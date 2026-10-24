@@ -4,11 +4,15 @@ project:
   output_dir: "outputs/default_run"
 
 data:
-  dataset_name: "mock"
-  image_size: [256, 256]
+  dataset_name: "KhangTruong/COCO-inpainted"
+  image_size: [512, 512]
+  num_workers: -1
   batch_size: 8
-  train_samples_per_epoch: 64
-  val_samples: 32
+  streaming: true
+  train_split: "train"
+  val_split: "validation"
+  train_samples_per_epoch: 2000
+  val_samples: 400
   augmentations:
     horizontal_flip: 0.5
     vertical_flip: 0.0

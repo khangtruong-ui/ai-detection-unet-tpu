@@ -7,7 +7,9 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import sys
 import numpy as np
+from tqdm import tqdm
 
 from sid_unet.cache.extractor import BaseCacheExtractor, get_cache_extractor
 
@@ -60,7 +62,17 @@ class DatasetCacheManager:
         shard_files = []
         num_shards = max(1, (num_samples + self.samples_per_shard - 1) // self.samples_per_shard)
 
-        for s_idx in range(num_shards):
+        pbar = tqdm(
+            range(num_shards),
+            desc=f"Caching [{split}]",
+            total=num_shards,
+            unit="shard",
+            file=sys.stdout,
+            dynamic_ncols=True,
+            leave=True,
+        )
+
+        for s_idx in pbar:
             start = s_idx * self.samples_per_shard
             end = min(num_samples, (s_idx + 1) * self.samples_per_shard)
 
@@ -72,6 +84,7 @@ class DatasetCacheManager:
                 labels=all_labels[start:end],
             )
             shard_files.append(str(shard_path))
+            pbar.set_postfix({"samples": f"{end}/{num_samples}"})
 
         meta = self.extractor.get_metadata()
         meta.update({

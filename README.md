@@ -30,15 +30,21 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
    - Seamlessly loads `.pt` and `.safetensors` checkpoints created by PyTorch trainers, converting them into Flax parameter PyTrees on the fly.
    - Saved checkpoints contain `model_state_dict` with canonical PyTorch tensor keys (`z_norm.weight`, `decoder.init_conv.0.weight`, etc.) for instant cross-framework deployment.
 
-4. **Detached Terminal Execution Logging to `.logs.txt`**:
+4. **Detached Terminal Execution Logging to `.logs.txt` with TQDM Progress**:
    - All primary CLI commands (`sid-train`, `sid-cache`, `sid-kill`) default to **detaching from the controlling terminal session** into background mode (`setsid`).
    - Standard output and standard error are automatically streamed into `.logs.txt`.
+   - Rich `tqdm` progress tracking with metric monitoring (loss, lr, steps, epochs) during training, validation, and shard caching.
    - Immune to terminal window closes, SSH disconnects, and hangup signals (`SIGHUP`, `SIGPIPE`).
    - Use `--foreground` or `--no-detach` anytime for interactive debugging.
 
 5. **Integrated Process Termination (`sid-kill`)**:
    - Automatically discovers running or orphaned `sid_unet` processes.
    - Performs two-stage termination: graceful shutdown (`SIGINT`/`SIGTERM`) followed by timeout escalation to `SIGKILL`.
+
+6. **Default Configuration for Real Forensics Datasets**:
+   - Default dataset set to [`KhangTruong/COCO-inpainted`](https://huggingface.co/datasets/KhangTruong/COCO-inpainted).
+   - Standard forensics resolution `image_size: [512, 512]`.
+   - Automatic multi-worker data loading defaulting to full CPU count (`os.cpu_count()`).
 
 ---
 

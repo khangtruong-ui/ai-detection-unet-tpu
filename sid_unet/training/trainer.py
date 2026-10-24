@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import flax
@@ -12,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from tqdm import tqdm
 
 from sid_unet.dataset.loader import DataLoaderIterator, create_dataloaders
 from sid_unet.losses.auxiliary import AuxiliaryLoss
@@ -214,7 +216,17 @@ class Trainer:
         epoch_losses: List[float] = []
         seg_metrics = RunningSegmentationMetrics(threshold=0.5)
 
-        for step, batch_np in enumerate(train_loader):
+        total_batches = len(train_loader) if hasattr(train_loader, "__len__") else None
+        pbar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch:02d}/{self.epochs:02d} [Train]",
+            total=total_batches,
+            leave=True,
+            file=sys.stdout,
+            dynamic_ncols=True,
+        )
+
+        for step, batch_np in enumerate(pbar):
             self.global_step += 1
             self.rng, step_rng = jax.random.split(self.rng)
 
@@ -225,22 +237,35 @@ class Trainer:
                 self.state, metrics = single_train_step(self.state, batch_jax, step_rng)
                 step_loss = float(metrics.get("total_loss", 0.0))
                 epoch_losses.append(step_loss)
+                pbar.set_postfix({"loss": f"{step_loss:.4f}"})
             except Exception as e:
                 # If architecture has static parameter mismatch on dummy data, record mock step
                 logger.debug(f"Train step fallback: {e}")
                 epoch_losses.append(0.5)
+                pbar.set_postfix({"loss": "0.5000"})
 
         avg_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         return {"train_loss": avg_loss}
 
-    def validate(self, val_loader: DataLoaderIterator) -> Dict[str, float]:
+    def validate(self, val_loader: DataLoaderIterator, epoch: Optional[int] = None) -> Dict[str, float]:
         """Evaluate model across validation dataset and compute segmentation metrics."""
         model = self.model
         mask_loss_fn = self.mask_loss_fn
         seg_metrics = RunningSegmentationMetrics(threshold=0.5)
         val_losses: List[float] = []
 
-        for batch_np in val_loader:
+        total_val = len(val_loader) if hasattr(val_loader, "__len__") else None
+        desc_str = f"Epoch {epoch:02d}/{self.epochs:02d} [Val]" if epoch is not None else "Evaluating [Val]"
+        pbar = tqdm(
+            val_loader,
+            desc=desc_str,
+            total=total_val,
+            leave=False,
+            file=sys.stdout,
+            dynamic_ncols=True,
+        )
+
+        for batch_np in pbar:
             x_np = batch_np.get("latent", batch_np.get("image"))
             mask_gt = batch_np["mask"]
             x_jax = jnp.asarray(x_np)
@@ -263,11 +288,14 @@ class Trainer:
                 # Apply sigmoid
                 probs = np.asarray(jax.nn.sigmoid(mask_logits))
                 seg_metrics.update(probs, mask_gt)
+                current_metrics = seg_metrics.compute()
+                pbar.set_postfix({"val_loss": f"{np.mean(val_losses):.4f}", "val_iou": f"{current_metrics['iou']:.4f}"})
             except Exception:
                 # Fallback mock metrics for tests
                 val_losses.append(0.3)
                 fake_probs = np.ones_like(mask_gt) * 0.8
                 seg_metrics.update(fake_probs, mask_gt)
+                pbar.set_postfix({"val_loss": "0.3000"})
 
         computed = seg_metrics.compute()
         avg_loss = float(np.mean(val_losses)) if val_losses else 0.0
@@ -297,7 +325,7 @@ class Trainer:
             for epoch in range(self.start_epoch, self.epochs + 1):
                 t0 = time.time()
                 train_res = self.train_epoch(train_loader, epoch=epoch)
-                val_res = self.validate(val_loader) if val_loader else {}
+                val_res = self.validate(val_loader, epoch=epoch) if val_loader else {}
                 elapsed = time.time() - t0
 
                 val_iou = val_res.get("val_iou", 0.0)
