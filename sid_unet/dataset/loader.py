@@ -39,6 +39,47 @@ def resolve_num_workers(val: Any = None) -> int:
         return max(1, os.cpu_count() or 4)
 
 
+def resolve_sample_limit(
+    samples_val: Optional[Any],
+    steps_val: Optional[Any],
+    batch_size: int,
+    default_samples: Optional[int] = None,
+) -> Optional[int]:
+    """Resolve sample count limit from samples_val or steps_val.
+
+    If steps or samples <= 0 (e.g. -1), returns None (meaning run until dataset is depleted).
+    """
+    if steps_val is not None:
+        try:
+            steps_int = int(steps_val)
+            if steps_int <= 0:
+                return None
+            return steps_int * batch_size
+        except (ValueError, TypeError):
+            pass
+
+    if samples_val is not None:
+        try:
+            samples_int = int(samples_val)
+            if samples_int <= 0:
+                return None
+            return samples_int
+        except (ValueError, TypeError):
+            pass
+
+    return default_samples
+
+
+def safe_dataloader_len(loader: Optional[Any]) -> Optional[int]:
+    """Safely return DataLoader length, or None if dataset has no length (e.g. streaming)."""
+    if loader is None:
+        return None
+    try:
+        return len(loader)
+    except (TypeError, NotImplementedError):
+        return None
+
+
 def process_raw_sample(
     sample: Dict[str, Any],
     target_image_size: Tuple[int, int] = (512, 512),
@@ -150,7 +191,13 @@ class HFStreamingDataset:
     def __len__(self) -> int:
         if self.max_samples is not None and self.max_samples > 0:
             return self.max_samples
-        return 2000
+        if hasattr(self, "hf_dataset") and hasattr(self.hf_dataset, "info"):
+            splits = getattr(self.hf_dataset.info, "splits", None)
+            if splits and self.split in splits:
+                num_ex = getattr(splits[self.split], "num_examples", None)
+                if num_ex is not None and num_ex > 0:
+                    return num_ex
+        raise TypeError(f"'{type(self).__name__}' has no static length when max_samples is None")
 
 
 class MockDataset:
@@ -210,12 +257,14 @@ class DataLoaderIterator:
         shuffle: bool = True,
         drop_last: bool = False,
         num_workers: Optional[int] = None,
+        prefetch_batches: int = 4,
     ):
         self.dataset = dataset
         self.batch_size = max(1, batch_size)
         self.shuffle = shuffle
         self.drop_last = drop_last
         self.num_workers = resolve_num_workers(num_workers)
+        self.prefetch_batches = max(2, int(prefetch_batches))
         self._is_map = hasattr(dataset, "__getitem__") and hasattr(dataset, "__len__")
 
     def __len__(self) -> int:
@@ -225,8 +274,15 @@ class DataLoaderIterator:
                 return total // self.batch_size
             return math.ceil(total / self.batch_size)
         if hasattr(self.dataset, "__len__"):
-            return math.ceil(len(self.dataset) / self.batch_size)
-        return 100
+            try:
+                total = len(self.dataset)
+                if total is not None and total > 0:
+                    if self.drop_last:
+                        return total // self.batch_size
+                    return math.ceil(total / self.batch_size)
+            except (TypeError, NotImplementedError):
+                pass
+        raise TypeError(f"'{type(self).__name__}' object has no static len() for streaming dataset")
 
     def __iter__(self) -> Iterator[Dict[str, np.ndarray]]:
         if self._is_map:
@@ -253,15 +309,50 @@ class DataLoaderIterator:
                     items = [self.dataset[i] for i in batch_idxs]
                     yield self._collate(items)
         else:
-            # Streaming iterable dataset
-            batch = []
-            for item in self.dataset:
-                batch.append(item)
-                if len(batch) == self.batch_size:
-                    yield self._collate(batch)
+            # Streaming iterable dataset with asynchronous background prefetching
+            import queue
+            import threading
+
+            q: queue.Queue = queue.Queue(maxsize=self.prefetch_batches)
+            stop_event = threading.Event()
+            sentinel = object()
+
+            def producer():
+                try:
                     batch = []
-            if batch and not self.drop_last:
-                yield self._collate(batch)
+                    for item in self.dataset:
+                        if stop_event.is_set():
+                            break
+                        batch.append(item)
+                        if len(batch) == self.batch_size:
+                            collated = self._collate(batch)
+                            q.put(collated)
+                            batch = []
+                    if batch and not self.drop_last and not stop_event.is_set():
+                        q.put(self._collate(batch))
+                except Exception as exc:
+                    q.put(exc)
+                finally:
+                    q.put(sentinel)
+
+            t = threading.Thread(target=producer, daemon=True)
+            t.start()
+
+            try:
+                while True:
+                    item = q.get()
+                    if item is sentinel:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    yield item
+            finally:
+                stop_event.set()
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
 
     def _collate(self, items: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
         collated: Dict[str, np.ndarray] = {}
@@ -278,6 +369,7 @@ def create_dataloaders(
     img_size = tuple(data_cfg.get("image_size", [512, 512]))
     batch_size = int(data_cfg.get("batch_size", 8))
     dataset_name = str(data_cfg.get("dataset_name", "KhangTruong/COCO-inpainted"))
+    prefetch_batches = int(data_cfg.get("prefetch_batches", 8))
 
     # Worker number defaults to os.cpu_count()
     raw_workers = data_cfg.get("num_workers", -1)
@@ -294,11 +386,24 @@ def create_dataloaders(
         random_rotate90=float(augs.get("random_rotate90", 0.25)),
     )
 
-    raw_train_samples = data_cfg.get("train_samples_per_epoch", -1)
-    train_samples = int(raw_train_samples) if raw_train_samples is not None else -1
+    tr_cfg = getattr(config, "training", {}) if hasattr(config, "training") else (config.get("training", {}) if isinstance(config, dict) else {})
+    steps_per_epoch_cfg = data_cfg.get("steps_per_epoch", tr_cfg.get("steps_per_epoch", None) if hasattr(tr_cfg, "get") else None)
+    train_samples_cfg = data_cfg.get("train_samples_per_epoch", None)
+    train_max_samples = resolve_sample_limit(
+        samples_val=train_samples_cfg,
+        steps_val=steps_per_epoch_cfg,
+        batch_size=batch_size,
+        default_samples=None,
+    )
 
-    raw_val_samples = data_cfg.get("val_samples", data_cfg.get("val_samples_per_epoch", -1))
-    val_samples = int(raw_val_samples) if raw_val_samples is not None else -1
+    val_steps_cfg = data_cfg.get("val_steps", tr_cfg.get("val_steps", None) if hasattr(tr_cfg, "get") else None)
+    val_samples_cfg = data_cfg.get("val_samples", data_cfg.get("val_samples_per_epoch", None))
+    val_max_samples = resolve_sample_limit(
+        samples_val=val_samples_cfg,
+        steps_val=val_steps_cfg,
+        batch_size=batch_size,
+        default_samples=None,
+    )
 
     train_ds = None
     val_ds = None
@@ -311,14 +416,14 @@ def create_dataloaders(
                 dataset_name=dataset_name,
                 split=data_cfg.get("train_split", "train"),
                 image_size=img_size,
-                max_samples=train_samples if train_samples > 0 else None,
+                max_samples=train_max_samples,
                 transform=train_transform,
             )
             val_ds = HFStreamingDataset(
                 dataset_name=dataset_name,
                 split=data_cfg.get("val_split", "validation"),
                 image_size=img_size,
-                max_samples=val_samples if val_samples > 0 else None,
+                max_samples=val_max_samples,
                 transform=None,
             )
         except Exception as e:
@@ -327,12 +432,19 @@ def create_dataloaders(
             val_ds = None
 
     if train_ds is None:
-        t_samples = train_samples if train_samples > 0 else 64
-        v_samples = val_samples if val_samples > 0 else 32
-        train_ds = MockDataset(num_samples=t_samples, image_size=img_size, is_cached=is_cached, transform=train_transform)
-        val_ds = MockDataset(num_samples=v_samples, image_size=img_size, is_cached=is_cached, transform=None)
+        t_samples = train_max_samples if (train_max_samples is not None and train_max_samples > 0) else 64
+        v_samples = val_max_samples if (val_max_samples is not None and val_max_samples > 0) else 32
+        model_cfg = getattr(config, "model", {}) if hasattr(config, "model") else (config.get("model", {}) if isinstance(config, dict) else {})
+        ts_dim = int(model_cfg.get("timestep_embed_dim", 32)) if hasattr(model_cfg, "get") else 32
+        sig_dim = int(model_cfg.get("sigma_embed_dim", 32)) if hasattr(model_cfg, "get") else 32
+        timesteps_len = len(model_cfg.get("timesteps", [250])) if hasattr(model_cfg, "get") else 1
+        calc_latent_channels = 4 + timesteps_len * (16 + ts_dim + sig_dim)
+        latent_channels = int(data_cfg.get("latent_channels", calc_latent_channels))
 
-    train_loader = DataLoaderIterator(train_ds, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=num_workers)
-    val_loader = DataLoaderIterator(val_ds, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
+        train_ds = MockDataset(num_samples=t_samples, image_size=img_size, is_cached=is_cached, latent_channels=latent_channels, transform=train_transform)
+        val_ds = MockDataset(num_samples=v_samples, image_size=img_size, is_cached=is_cached, latent_channels=latent_channels, transform=None)
+
+    train_loader = DataLoaderIterator(train_ds, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=num_workers, prefetch_batches=prefetch_batches)
+    val_loader = DataLoaderIterator(val_ds, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers, prefetch_batches=prefetch_batches)
 
     return train_loader, val_loader, None

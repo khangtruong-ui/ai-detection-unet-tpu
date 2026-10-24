@@ -10,6 +10,8 @@ from sid_unet.dataset.loader import (
     MockDataset,
     DataLoaderIterator,
     resolve_num_workers,
+    resolve_sample_limit,
+    safe_dataloader_len,
     process_raw_sample,
     create_dataloaders,
 )
@@ -116,3 +118,56 @@ def test_cache_manager_and_shard_dataset(tmp_path):
     assert "latent" in item
     assert "mask" in item
     assert "label" in item
+
+
+@pytest.mark.timeout(60)
+def test_resolve_sample_limit():
+    # steps specified takes precedence and multiplies by batch_size
+    assert resolve_sample_limit(samples_val=100, steps_val=50, batch_size=4) == 200
+    # negative steps or samples resolves to None (unbounded streaming)
+    assert resolve_sample_limit(samples_val=100, steps_val=-1, batch_size=4) is None
+    assert resolve_sample_limit(samples_val=-1, steps_val=None, batch_size=4) is None
+    # sample count used when steps is None
+    assert resolve_sample_limit(samples_val=128, steps_val=None, batch_size=4) == 128
+    # fallback to default_samples
+    assert resolve_sample_limit(samples_val=None, steps_val=None, batch_size=4, default_samples=64) == 64
+    assert resolve_sample_limit(samples_val=None, steps_val=None, batch_size=4, default_samples=None) is None
+
+
+@pytest.mark.timeout(60)
+def test_streaming_dataloader_iterator_prefetch():
+    # Iterable dataset that does not support indexing
+    class SimpleIterableDataset:
+        def __init__(self, n=12):
+            self.n = n
+
+        def __iter__(self):
+            for i in range(self.n):
+                yield {
+                    "image": np.full((32, 32, 3), i, dtype=np.float32),
+                    "mask": np.zeros((32, 32, 1), dtype=np.float32),
+                    "label": np.array([0], dtype=np.int32),
+                }
+
+    ds = SimpleIterableDataset(n=10)
+    loader = DataLoaderIterator(ds, batch_size=2, shuffle=False, prefetch_batches=4)
+    # Length of unindexed streaming dataset with no max_samples raises TypeError
+    with pytest.raises(TypeError):
+        _ = len(loader)
+    assert safe_dataloader_len(loader) is None
+
+    batches = list(loader)
+    assert len(batches) == 5
+    assert batches[0]["image"].shape == (2, 32, 32, 3)
+    assert np.all(batches[0]["image"][0] == 0)
+    assert np.all(batches[0]["image"][1] == 1)
+
+
+@pytest.mark.timeout(60)
+def test_create_dataloaders_steps_per_epoch_override():
+    cfg = load_config(
+        "configs/test_quick.yaml",
+        overrides=["data.dataset_name=mock", "data.steps_per_epoch=5", "data.batch_size=4"],
+    )
+    train_loader, val_loader, _ = create_dataloaders(cfg)
+    assert safe_dataloader_len(train_loader) == 5

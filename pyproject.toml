@@ -25,6 +25,7 @@ dependencies = [
     "psutil>=5.9.0",
     "pyarrow>=12.0.0",
     "datasets>=2.14.0",
+    "jax-model-zoo @ git+https://github.com/khangtruong-ui/jax-model-zoo.git",
 ]
 
 [project.optional-dependencies]

@@ -15,7 +15,7 @@ import numpy as np
 import optax
 from tqdm import tqdm
 
-from sid_unet.dataset.loader import DataLoaderIterator, create_dataloaders
+from sid_unet.dataset.loader import DataLoaderIterator, create_dataloaders, safe_dataloader_len
 from sid_unet.losses.auxiliary import AuxiliaryLoss
 from sid_unet.losses.combined import CombinedMaskLoss
 from sid_unet.metrics.segmentation import RunningSegmentationMetrics
@@ -186,14 +186,56 @@ class Trainer:
             label_gt = batch.get("label")
 
             variables = {"params": params}
-            if batch_stats is not None:
+            has_bs = batch_stats is not None
+            if has_bs:
                 variables["batch_stats"] = batch_stats
+
+            rngs = {"dropout": step_rng}
+            mutable = ["batch_stats"] if has_bs else []
 
             # Check if fast forward_cached is available for precomputed latents
             if "latent" in batch and hasattr(model, "forward_cached"):
-                out = model.apply(variables, x, target_size=mask_gt.shape[1:3], deterministic=False, method=model.forward_cached)
+                if mutable:
+                    out, mutated = model.apply(
+                        variables,
+                        x,
+                        target_size=mask_gt.shape[1:3],
+                        deterministic=False,
+                        method=model.forward_cached,
+                        rngs=rngs,
+                        mutable=mutable,
+                    )
+                    new_batch_stats = mutated.get("batch_stats", batch_stats)
+                else:
+                    out = model.apply(
+                        variables,
+                        x,
+                        target_size=mask_gt.shape[1:3],
+                        deterministic=False,
+                        method=model.forward_cached,
+                        rngs=rngs,
+                    )
+                    new_batch_stats = None
             else:
-                out = model.apply(variables, x, rng=step_rng, deterministic=False)
+                if mutable:
+                    out, mutated = model.apply(
+                        variables,
+                        x,
+                        rng=step_rng,
+                        rngs=rngs,
+                        deterministic=False,
+                        mutable=mutable,
+                    )
+                    new_batch_stats = mutated.get("batch_stats", batch_stats)
+                else:
+                    out = model.apply(
+                        variables,
+                        x,
+                        rng=step_rng,
+                        rngs=rngs,
+                        deterministic=False,
+                    )
+                    new_batch_stats = None
 
             if isinstance(out, tuple):
                 mask_logits, class_logits = out
@@ -211,20 +253,22 @@ class Trainer:
                 loss_metrics["aux_loss"] = c_loss
 
             loss_metrics["total_loss"] = total_loss
-            return total_loss, (loss_metrics, mask_logits)
+            return total_loss, (loss_metrics, new_batch_stats)
 
         # Single-device JIT training step
         @jax.jit
         def single_train_step(state, batch, step_rng):
             grad_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
-            (loss, (metrics, preds)), grads = grad_fn(state.params, batch, state.batch_stats, step_rng)
+            (loss, (metrics, new_batch_stats)), grads = grad_fn(state.params, batch, state.batch_stats, step_rng)
             new_state = state.apply_gradients(grads=grads)
+            if new_batch_stats is not None:
+                new_state = new_state.replace(batch_stats=new_batch_stats)
             return new_state, metrics
 
         epoch_losses: List[float] = []
         seg_metrics = RunningSegmentationMetrics(threshold=0.5)
 
-        total_batches = len(train_loader) if hasattr(train_loader, "__len__") else None
+        total_batches = safe_dataloader_len(train_loader)
         pbar = tqdm(
             train_loader,
             desc=f"Epoch {epoch:02d}/{self.epochs:02d} [Train]",
@@ -247,10 +291,8 @@ class Trainer:
                 epoch_losses.append(step_loss)
                 pbar.set_postfix({"loss": f"{step_loss:.4f}"})
             except Exception as e:
-                # If architecture has static parameter mismatch on dummy data, record mock step
-                logger.debug(f"Train step fallback: {e}")
-                epoch_losses.append(0.5)
-                pbar.set_postfix({"loss": "0.5000"})
+                logger.error(f"❌ Training step failed at epoch {epoch}, step {self.global_step}: {e}", exc_info=True)
+                raise e
 
         avg_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         return {"train_loss": avg_loss}
@@ -262,7 +304,7 @@ class Trainer:
         seg_metrics = RunningSegmentationMetrics(threshold=0.5)
         val_losses: List[float] = []
 
-        total_val = len(val_loader) if hasattr(val_loader, "__len__") else None
+        total_val = safe_dataloader_len(val_loader)
         desc_str = f"Epoch {epoch:02d}/{self.epochs:02d} [Val]" if epoch is not None else "Evaluating [Val]"
         pbar = tqdm(
             val_loader,

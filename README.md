@@ -11,19 +11,25 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
 
 ## 🌟 Key Features
 
-1. **JAX/Flax Native Architecture**:
+1. **JAX/Flax Native Architecture & GPU/TPU Utilization**:
    - High-throughput execution with XLA compilation (`jax.jit`).
+   - Proper Linen state management: updates `mutable=['batch_stats']` for batch normalization and threads `rngs={'dropout': ...}` PRNG keys, preventing fallback loops and maximizing hardware utilization.
+   - Asynchronous threaded prefetching in `DataLoaderIterator` to keep GPUs/TPUs fully utilized during streaming dataset training.
    - Multi-device single-host scaling across 8 TPU v5e cores or multi-GPU environments using `jax.pmap` and `axis_name='devices'`.
    - Native support for `bfloat16` (TPU-native precision) and `float32`.
 
 2. **Diffusion-Diff Series Forensics Backbones**:
-   - Integrated with [`jax-model-zoo`](https://github.com/khangtruong-ui/jax-model-zoo).
+   - Integrated with [`jax-model-zoo`](https://github.com/khangtruong-ui/jax-model-zoo) (specified in `pyproject.toml`).
    - **`DiffusionDiff`**: Multi-timestep latent feature decoder with sinusoidal timestep and noise schedule embeddings.
    - **`DiffusionDiffV2`**: Perpendicular skip connection fusion injecting parallel frozen VAE decoder skip features directly into trainable upsampling stages.
    - **`DiffusionDiffMinimized`**: Strictly adheres to 2 lines of computation:
      - *Line 1*: Real image clean latent $z_0$ (4 channels)
      - *Line 2*: Single chosen noisy latent from the diffusion model ($t=250$, 80 channels)
      - Total representation $Z = 84$ channels with parallel VAE perpendicular skips.
+
+3. **Flexible Epoch Sizing & Streaming Dataloaders**:
+   - Dynamic sample resolution via `resolve_sample_limit`: easily configure `steps_per_epoch` or `train_samples_per_epoch` directly from CLI overrides or YAML configs.
+   - Open-ended streaming datasets (setting limit to `-1` or `None`) stream continuously without being artificially clamped to 1000 steps.
 
 3. **100% Checkpoint Interoperability with `ai-detection-unet-gpu`**:
    - Model weights default to saving and loading in the exact PyTorch `state_dict` format expected by `ai-detection-unet-gpu`.
