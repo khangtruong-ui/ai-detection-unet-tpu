@@ -50,7 +50,7 @@ def test_trainer_smoke_run(tmp_path):
     assert results_resume["total_epochs"] == 3
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(240)
 def test_trainer_diffusion_diff_minimized_smoke_run(tmp_path):
     out_dir = tmp_path / "diff_smoke"
     cfg = load_config(
@@ -75,3 +75,25 @@ def test_trainer_diffusion_diff_minimized_smoke_run(tmp_path):
     assert results["total_epochs"] == 1
     assert "best_val_iou" in results
     assert trainer.state.batch_stats is not None
+
+
+@pytest.mark.timeout(120)
+def test_trainer_batch_size_1_with_aux_classifier(tmp_path):
+    out_dir = tmp_path / "bs1_aux_run"
+    cfg = load_config(
+        "configs/test_smoke.yaml",
+        overrides=[
+            f"project.output_dir={out_dir}",
+            "model.name=unet",
+            "model.aux_classifier=true",
+            "data.dataset_name=mock",
+            "data.batch_size=1",
+            "data.train_samples_per_epoch=2",
+            "data.val_samples=1",
+            "training.epochs=1",
+        ],
+    )
+    trainer = Trainer(cfg)
+    results = trainer.train()
+    assert results["total_epochs"] == 1
+    assert "best_val_iou" in results

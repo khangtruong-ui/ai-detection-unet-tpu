@@ -27,27 +27,28 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
      - *Line 2*: Single chosen noisy latent from the diffusion model ($t=250$, 80 channels)
      - Total representation $Z = 84$ channels with parallel VAE perpendicular skips.
 
-3. **Flexible Epoch Sizing & Streaming Dataloaders**:
+3. **Flexible Epoch Sizing & Robust Batch Handling**:
    - Dynamic sample resolution via `resolve_sample_limit`: easily configure `steps_per_epoch` or `train_samples_per_epoch` directly from CLI overrides or YAML configs.
    - Open-ended streaming datasets (setting limit to `-1` or `None`) stream continuously without being artificially clamped to 1000 steps.
+   - Robust batch dimension handling: loss formulations (segmentation mask losses and auxiliary classification cross-entropy) natively handle arbitrary batch dimensions including single-sample executions (`batch_size=1`) for memory-constrained environments.
 
-3. **100% Checkpoint Interoperability with `ai-detection-unet-gpu`**:
+4. **100% Checkpoint Interoperability with `ai-detection-unet-gpu`**:
    - Model weights default to saving and loading in the exact PyTorch `state_dict` format expected by `ai-detection-unet-gpu`.
    - Seamlessly loads `.pt` and `.safetensors` checkpoints created by PyTorch trainers, converting them into Flax parameter PyTrees on the fly.
    - Saved checkpoints contain `model_state_dict` with canonical PyTorch tensor keys (`z_norm.weight`, `decoder.init_conv.0.weight`, etc.) for instant cross-framework deployment.
 
-4. **Detached Terminal Execution Logging to `.logs.txt` with TQDM Progress**:
+5. **Detached Terminal Execution Logging to `.logs.txt` with TQDM Progress**:
    - All primary CLI commands (`sid-train`, `sid-cache`, `sid-kill`) default to **detaching from the controlling terminal session** into background mode (`setsid`).
    - Standard output and standard error are automatically streamed into `.logs.txt`.
    - Rich `tqdm` progress tracking with metric monitoring (loss, lr, steps, epochs) during training, validation, and shard caching.
    - Immune to terminal window closes, SSH disconnects, and hangup signals (`SIGHUP`, `SIGPIPE`).
    - Use `--foreground` or `--no-detach` anytime for interactive debugging.
 
-5. **Integrated Process Termination (`sid-kill`)**:
+6. **Integrated Process Termination (`sid-kill`)**:
    - Automatically discovers running or orphaned `sid_unet` processes.
    - Performs two-stage termination: graceful shutdown (`SIGINT`/`SIGTERM`) followed by timeout escalation to `SIGKILL`.
 
-6. **Default Configuration for Real Forensics Datasets**:
+7. **Default Configuration for Real Forensics Datasets**:
    - Default dataset set to [`KhangTruong/COCO-inpainted`](https://huggingface.co/datasets/KhangTruong/COCO-inpainted).
    - Standard forensics resolution `image_size: [512, 512]`.
    - Automatic multi-worker data loading defaulting to full CPU count (`os.cpu_count()`).

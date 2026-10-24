@@ -63,10 +63,33 @@ def test_combined_mask_loss():
 @pytest.mark.timeout(60)
 def test_auxiliary_loss():
     aux = AuxiliaryLoss()
+    # Batch size 2, 1D labels
     logits = jnp.array([[2.0, -1.0, 0.5], [-1.0, 3.0, 0.0]])
     labels = jnp.array([0, 1])
     loss = aux(logits, labels)
     assert loss > 0.0
+
+    # Batch size 2, 2D labels (e.g. from standard dataloader batching)
+    labels_2d = jnp.array([[0], [1]])
+    loss_2d = aux(logits, labels_2d)
+    assert jnp.allclose(loss, loss_2d)
+
+    # Batch size 1, 1D labels
+    logits_bs1 = jnp.array([[2.0, -1.0, 0.5]])
+    labels_bs1_1d = jnp.array([0])
+    loss_bs1_1d = aux(logits_bs1, labels_bs1_1d)
+    assert loss_bs1_1d > 0.0
+
+    # Batch size 1, 2D labels (shape [1, 1], reproducing single-sample batching)
+    labels_bs1_2d = jnp.array([[0]])
+    loss_bs1_2d = aux(logits_bs1, labels_bs1_2d)
+    assert jnp.allclose(loss_bs1_1d, loss_bs1_2d)
+
+    # Unbatched / scalar label
+    logits_unbatched = jnp.array([2.0, -1.0, 0.5])
+    labels_scalar = jnp.array(0)
+    loss_scalar = aux(logits_unbatched, labels_scalar)
+    assert jnp.allclose(loss_bs1_1d, loss_scalar)
 
 
 @pytest.mark.timeout(60)
