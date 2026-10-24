@@ -26,6 +26,8 @@ def test_trainer_smoke_run(tmp_path):
 
     assert results["total_epochs"] == 2
     assert "best_val_iou" in results
+    assert "train_iou" in results
+    assert results["train_iou"] >= 0.0
 
     ckpt_dir = out_dir / "checkpoints"
     latest_ckpt = ckpt_dir / "checkpoint_latest.pt"
@@ -74,6 +76,8 @@ def test_trainer_diffusion_diff_minimized_smoke_run(tmp_path):
     results = trainer.train()
     assert results["total_epochs"] == 1
     assert "best_val_iou" in results
+    assert "train_iou" in results
+    assert results["train_iou"] >= 0.0
     assert trainer.state.batch_stats is not None
 
 
@@ -97,3 +101,5 @@ def test_trainer_batch_size_1_with_aux_classifier(tmp_path):
     results = trainer.train()
     assert results["total_epochs"] == 1
     assert "best_val_iou" in results
+    assert "train_iou" in results
+    assert results["train_iou"] >= 0.0

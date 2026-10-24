@@ -40,7 +40,7 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
 5. **Detached Terminal Execution Logging to `.logs.txt` with TQDM Progress**:
    - All primary CLI commands (`sid-train`, `sid-cache`, `sid-kill`) default to **detaching from the controlling terminal session** into background mode (`setsid`).
    - Standard output and standard error are automatically streamed into `.logs.txt`.
-   - Rich `tqdm` progress tracking with metric monitoring (loss, lr, steps, epochs) during training, validation, and shard caching.
+   - Rich `tqdm` progress tracking with live metric monitoring (`loss`, `iou`, lr, steps, epochs) during both training and validation, as well as periodic step-level and epoch-level metric logs.
    - Immune to terminal window closes, SSH disconnects, and hangup signals (`SIGHUP`, `SIGPIPE`).
    - Use `--foreground` or `--no-detach` anytime for interactive debugging.
 

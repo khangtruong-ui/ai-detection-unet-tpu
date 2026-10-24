@@ -78,11 +78,13 @@ class Trainer:
         self.aux_loss_fn = AuxiliaryLoss()
         self.aux_weight = float(loss_cfg.get("aux_weight", 0.2))
 
-        # 3. Training Parameters
+        # 3. Training & Logging Parameters
         tr_cfg = getattr(config, "training", {}) if hasattr(config, "training") else config.get("training", {})
+        log_cfg = getattr(config, "logging", {}) if hasattr(config, "logging") else config.get("logging", {})
         self.epochs = int(tr_cfg.get("epochs", 10))
         self.lr = float(tr_cfg.get("learning_rate", 1e-4))
         self.weight_decay = float(tr_cfg.get("weight_decay", 1e-4))
+        self.log_interval = int(log_cfg.get("log_interval", 20))
         clip_norm = float(tr_cfg.get("grad_clip_norm", 1.0))
 
         # 4. Optimizer and Schedule
@@ -246,6 +248,20 @@ class Trainer:
             m_loss, loss_metrics = mask_loss_fn(mask_logits, mask_gt)
             total_loss = m_loss
 
+            # Segmentation Metrics (IoU & confusion counts)
+            probs = jax.nn.sigmoid(mask_logits)
+            pred_bin = (probs >= 0.5).astype(jnp.float32)
+            target_bin = (mask_gt >= 0.5).astype(jnp.float32)
+            tp = jnp.sum(pred_bin * target_bin)
+            fp = jnp.sum(pred_bin * (1.0 - target_bin))
+            fn = jnp.sum((1.0 - pred_bin) * target_bin)
+            tn = jnp.sum((1.0 - pred_bin) * (1.0 - target_bin))
+            loss_metrics["iou"] = (tp + 1e-7) / (tp + fp + fn + 1e-7)
+            loss_metrics["tp"] = tp
+            loss_metrics["fp"] = fp
+            loss_metrics["fn"] = fn
+            loss_metrics["tn"] = tn
+
             # Aux Classification Loss
             if aux_classifier and class_logits is not None and label_gt is not None:
                 c_loss = aux_loss_fn(class_logits, label_gt)
@@ -289,13 +305,40 @@ class Trainer:
                 self.state, metrics = single_train_step(self.state, batch_jax, step_rng)
                 step_loss = float(metrics.get("total_loss", 0.0))
                 epoch_losses.append(step_loss)
-                pbar.set_postfix({"loss": f"{step_loss:.4f}"})
+
+                if "tp" in metrics:
+                    seg_metrics.update_counts(
+                        tp=metrics["tp"],
+                        fp=metrics["fp"],
+                        fn=metrics["fn"],
+                        tn=metrics.get("tn", 0.0),
+                    )
+                current_metrics = seg_metrics.compute()
+                current_iou = current_metrics["iou"]
+
+                pbar.set_postfix({"loss": f"{step_loss:.4f}", "iou": f"{current_iou:.4f}"})
+
+                if self.log_interval > 0 and (step + 1) % self.log_interval == 0:
+                    total_str = f"/{total_batches}" if total_batches and total_batches > 0 else ""
+                    logger.info(
+                        f"Epoch [{epoch:02d}/{self.epochs:02d}] "
+                        f"Step [{step + 1}{total_str}] "
+                        f"Train Loss: {step_loss:.4f} | "
+                        f"Train IoU: {current_iou:.4f}"
+                    )
             except Exception as e:
                 logger.error(f"❌ Training step failed at epoch {epoch}, step {self.global_step}: {e}", exc_info=True)
                 raise e
 
         avg_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
-        return {"train_loss": avg_loss}
+        computed = seg_metrics.compute()
+        return {
+            "train_loss": avg_loss,
+            "train_iou": computed["iou"],
+            "train_dice": computed["dice"],
+            "train_f1": computed["f1"],
+            "train_accuracy": computed["accuracy"],
+        }
 
     def validate(self, val_loader: DataLoaderIterator, epoch: Optional[int] = None) -> Dict[str, float]:
         """Evaluate model across validation dataset and compute segmentation metrics."""
@@ -378,11 +421,14 @@ class Trainer:
                 val_res = self.validate(val_loader, epoch=epoch) if val_loader else {}
                 elapsed = time.time() - t0
 
+                train_loss = train_res.get("train_loss", 0.0)
+                train_iou = train_res.get("train_iou", 0.0)
                 val_iou = val_res.get("val_iou", 0.0)
                 val_loss = val_res.get("val_loss", 0.0)
                 logger.info(
                     f"Epoch [{epoch:02d}/{self.epochs:02d}] "
-                    f"Train Loss: {train_res['train_loss']:.4f} | "
+                    f"Train Loss: {train_loss:.4f} | "
+                    f"Train IoU: {train_iou:.4f} | "
                     f"Val Loss: {val_loss:.4f} | "
                     f"Val IoU: {val_iou:.4f} | "
                     f"Time: {elapsed:.2f}s"
@@ -425,4 +471,10 @@ class Trainer:
                 logger.error(f"Failed to save emergency checkpoint: {e}")
 
         logger.info(f"🎉 Training run complete! Best Val IoU: {best_val_iou:.4f}")
-        return {"best_val_iou": best_val_iou, "total_epochs": epoch, "final_step": self.global_step}
+        return {
+            "best_val_iou": best_val_iou,
+            "total_epochs": epoch,
+            "final_step": self.global_step,
+            "train_loss": train_res.get("train_loss", 0.0),
+            "train_iou": train_res.get("train_iou", 0.0),
+        }

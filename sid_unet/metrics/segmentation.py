@@ -104,6 +104,20 @@ class RunningSegmentationMetrics:
         self.tn += float(np.sum((pred_bin == 0) & (target_bin == 0)))
         self.count += 1
 
+    def update_counts(
+        self,
+        tp: float | int,
+        fp: float | int,
+        fn: float | int,
+        tn: float | int = 0.0,
+    ) -> None:
+        """Update confusion matrix statistics directly from scalar counts."""
+        self.tp += float(tp)
+        self.fp += float(fp)
+        self.fn += float(fn)
+        self.tn += float(tn)
+        self.count += 1
+
     def compute(self) -> Dict[str, float]:
         smooth = 1e-7
         total = self.tp + self.fp + self.fn + self.tn

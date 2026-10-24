@@ -118,6 +118,17 @@ def test_running_segmentation_metrics():
     assert res["iou"] > 0.9
     assert res["accuracy"] == 1.0
 
+    # Test update_counts matches update directly
+    runner_counts = RunningSegmentationMetrics(threshold=0.5)
+    # p1 vs t1: 4 * 16 * 16 all 1s -> 1024 tp
+    runner_counts.update_counts(tp=1024.0, fp=0.0, fn=0.0, tn=0.0)
+    # p2 vs t2: 4 * 16 * 16 all 0s -> 1024 tn
+    runner_counts.update_counts(tp=0.0, fp=0.0, fn=0.0, tn=1024.0)
+
+    res_counts = runner_counts.compute()
+    assert np.isclose(res["iou"], res_counts["iou"])
+    assert np.isclose(res["accuracy"], res_counts["accuracy"])
+
 
 @pytest.mark.timeout(60)
 def test_classification_metrics():
