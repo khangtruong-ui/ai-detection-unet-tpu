@@ -49,7 +49,7 @@ class DiffusionDiffV2(JMZDiffusionDiffV2):
 
             curr_rng, subkey = jax.random.split(curr_rng)
             eps_k = jax.random.normal(subkey, z0.shape, dtype=z0.dtype)
-            z_tk = sqrt_alpha_bar * z0 + sigma_val * eps_k
+            z_tk = sqrt_alpha_bar.astype(z0.dtype) * z0 + sigma_val.astype(z0.dtype) * eps_k
 
             t_tensor = jnp.full((b,), t_clamped, dtype=jnp.int32)
             cross_dim = self.diffuser.config.cross_attention_dim
@@ -58,11 +58,11 @@ class DiffusionDiffV2(JMZDiffusionDiffV2):
             pred_eps = self.diffuser(z_tk, t_tensor, encoder_hidden_states=uncond_emb)
 
             t_emb = sinusoidal_embedding(t_tensor.astype(jnp.float32), dim=self.config.timestep_embed_dim)
-            t_spatial = expand_to_spatial(t_emb, h_z, w_z)
+            t_spatial = expand_to_spatial(t_emb, h_z, w_z).astype(z0.dtype)
 
             sigma_tensor = jnp.broadcast_to(sigma_val[None], (b,))
             sigma_emb = sinusoidal_embedding(sigma_tensor, dim=self.config.sigma_embed_dim)
-            sigma_spatial = expand_to_spatial(sigma_emb, h_z, w_z)
+            sigma_spatial = expand_to_spatial(sigma_emb, h_z, w_z).astype(z0.dtype)
 
             if self.config.include_noisy_latents:
                 z_components.append(z_tk)

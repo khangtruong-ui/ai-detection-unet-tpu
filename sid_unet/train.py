@@ -47,6 +47,13 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Path to checkpoint file or 'auto' to resume automatically.",
     )
     parser.add_argument(
+        "--precision",
+        type=str,
+        default=None,
+        choices=["auto", "float32", "float16", "bfloat16", "fp32", "fp16", "bf16"],
+        help="Compute precision policy: 'auto', 'float16', 'bfloat16', or 'float32'.",
+    )
+    parser.add_argument(
         "--foreground",
         "--no-detach",
         action="store_true",
@@ -56,13 +63,17 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(args)
 
 
-def run_single_config(config_path: str, overrides: List[str], resume: Optional[str] = None):
+def run_single_config(config_path: str, overrides: List[str], resume: Optional[str] = None, precision: Optional[str] = None):
     """Run training for a single YAML config."""
     cfg = load_config(config_path, overrides=overrides)
     if resume is not None:
         if not hasattr(cfg, "training") or cfg.training is None:
             cfg.training = {}
         cfg.training["resume"] = resume
+    if precision is not None:
+        if not hasattr(cfg, "training") or cfg.training is None:
+            cfg.training = {}
+        cfg.training["precision"] = precision
 
     trainer = Trainer(cfg)
     return trainer.train()
@@ -86,7 +97,7 @@ def cli_main(argv: Optional[List[str]] = None) -> int:
 
     for cfg_path in args.config:
         logger.info(f"▶️ Launching training run for: {cfg_path}")
-        run_single_config(cfg_path, overrides=args.override, resume=args.resume)
+        run_single_config(cfg_path, overrides=args.override, resume=args.resume, precision=args.precision)
 
     logger.info("🏁 All training runs finished successfully.")
     return 0

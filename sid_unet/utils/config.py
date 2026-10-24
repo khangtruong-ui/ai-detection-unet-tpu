@@ -93,6 +93,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_lr": 1e-6,
         "grad_clip_norm": 1.0,
         "amp": True,
+        "precision": "auto",  # 'auto', 'float32', 'float16', 'bfloat16'
         "gradient_accumulation_steps": 1,
         "data_parallel": True,
         "use_hard_mining": False,

@@ -37,18 +37,22 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
    - Seamlessly loads `.pt` and `.safetensors` checkpoints created by PyTorch trainers, converting them into Flax parameter PyTrees on the fly.
    - Saved checkpoints contain `model_state_dict` with canonical PyTorch tensor keys (`z_norm.weight`, `decoder.init_conv.0.weight`, etc.) for instant cross-framework deployment.
 
-5. **Detached Terminal Execution Logging to `.logs.txt` with TQDM Progress**:
+5. **Detached Terminal Execution Logging to `.logs.txt` with Clean TQDM Progress**:
    - All primary CLI commands (`sid-train`, `sid-cache`, `sid-kill`) default to **detaching from the controlling terminal session** into background mode (`setsid`).
    - Standard output and standard error are automatically streamed into `.logs.txt`.
-   - Rich `tqdm` progress tracking with live metric monitoring (`loss`, `iou`, lr, steps, epochs) during both training and validation, as well as periodic step-level and epoch-level metric logs.
+   - Dedicated, clean `tqdm` progress tracking with live step metric monitoring (`loss`, `iou`) without interleaved step logs, combined with comprehensive epoch-level metric summaries.
    - Immune to terminal window closes, SSH disconnects, and hangup signals (`SIGHUP`, `SIGPIPE`).
    - Use `--foreground` or `--no-detach` anytime for interactive debugging.
 
-6. **Integrated Process Termination (`sid-kill`)**:
+6. **Mixed Precision Support & Pipeline Bottleneck Profiling**:
+   - Configurable compute precision via `--precision auto|float16|bfloat16|float32` (or `training.precision` in YAML config). Automatically selects `bfloat16` for TPU cores and `float16` for GPUs with Tensor Cores, keeping float32 master weights for numerical stability.
+   - Built-in `TrainingProfiler` and `get_gpu_utilization` to detect data loading vs compute bottlenecks, throughput (samples/sec), and GPU memory/utilization.
+
+7. **Integrated Process Termination (`sid-kill`)**:
    - Automatically discovers running or orphaned `sid_unet` processes.
    - Performs two-stage termination: graceful shutdown (`SIGINT`/`SIGTERM`) followed by timeout escalation to `SIGKILL`.
 
-7. **Default Configuration for Real Forensics Datasets**:
+8. **Default Configuration for Real Forensics Datasets**:
    - Default dataset set to [`KhangTruong/COCO-inpainted`](https://huggingface.co/datasets/KhangTruong/COCO-inpainted).
    - Standard forensics resolution `image_size: [512, 512]`.
    - Automatic multi-worker data loading defaulting to full CPU count (`os.cpu_count()`).

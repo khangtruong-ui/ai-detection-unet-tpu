@@ -87,6 +87,30 @@ class Trainer:
         self.log_interval = int(log_cfg.get("log_interval", 20))
         clip_norm = float(tr_cfg.get("grad_clip_norm", 1.0))
 
+        # Precision Resolution (auto, float16, bfloat16, float32)
+        prec_str = str(tr_cfg.get("precision", "auto")).lower()
+        if prec_str == "auto":
+            if self.device_info.get("is_tpu", False):
+                self.compute_dtype = jnp.bfloat16
+                self.precision = "bfloat16"
+            elif self.device_info.get("is_gpu", False):
+                self.compute_dtype = jnp.float16
+                self.precision = "float16"
+            else:
+                self.compute_dtype = jnp.float32
+                self.precision = "float32"
+        elif prec_str in ("bfloat16", "bf16"):
+            self.compute_dtype = jnp.bfloat16
+            self.precision = "bfloat16"
+        elif prec_str in ("float16", "fp16", "half"):
+            self.compute_dtype = jnp.float16
+            self.precision = "float16"
+        else:
+            self.compute_dtype = jnp.float32
+            self.precision = "float32"
+
+        logger.info(f"⚡ Precision setting: '{self.precision}' (compute_dtype: {self.compute_dtype})")
+
         # 4. Optimizer and Schedule
         warmup_steps = tr_cfg.get("warmup_steps")
         if warmup_steps is None:
@@ -180,6 +204,7 @@ class Trainer:
         aux_loss_fn = self.aux_loss_fn
         aux_classifier = self.aux_classifier
         aux_weight = self.aux_weight
+        compute_dtype = self.compute_dtype
 
         # Pure loss function for jax.value_and_grad
         def loss_fn(params, batch, batch_stats, step_rng):
@@ -187,10 +212,23 @@ class Trainer:
             mask_gt = batch["mask"]
             label_gt = batch.get("label")
 
-            variables = {"params": params}
             has_bs = batch_stats is not None
-            if has_bs:
-                variables["batch_stats"] = batch_stats
+            if compute_dtype != jnp.float32:
+                params_comp = jax.tree_util.tree_map(
+                    lambda p: p.astype(compute_dtype) if jnp.issubdtype(p.dtype, jnp.floating) else p,
+                    params,
+                )
+                variables = {"params": params_comp}
+                if has_bs:
+                    variables["batch_stats"] = jax.tree_util.tree_map(
+                        lambda b: b.astype(compute_dtype) if jnp.issubdtype(b.dtype, jnp.floating) else b,
+                        batch_stats,
+                    )
+                x = x.astype(compute_dtype)
+            else:
+                variables = {"params": params}
+                if has_bs:
+                    variables["batch_stats"] = batch_stats
 
             rngs = {"dropout": step_rng}
             mutable = ["batch_stats"] if has_bs else []
@@ -244,6 +282,11 @@ class Trainer:
             else:
                 mask_logits, class_logits = out, None
 
+            # Compute losses in float32 for numerical stability
+            mask_logits = mask_logits.astype(jnp.float32)
+            if class_logits is not None:
+                class_logits = class_logits.astype(jnp.float32)
+
             # Mask Loss
             m_loss, loss_metrics = mask_loss_fn(mask_logits, mask_gt)
             total_loss = m_loss
@@ -278,6 +321,11 @@ class Trainer:
             (loss, (metrics, new_batch_stats)), grads = grad_fn(state.params, batch, state.batch_stats, step_rng)
             new_state = state.apply_gradients(grads=grads)
             if new_batch_stats is not None:
+                if compute_dtype != jnp.float32:
+                    new_batch_stats = jax.tree_util.tree_map(
+                        lambda b: b.astype(jnp.float32) if jnp.issubdtype(b.dtype, jnp.floating) else b,
+                        new_batch_stats,
+                    )
                 new_state = new_state.replace(batch_stats=new_batch_stats)
             return new_state, metrics
 
@@ -317,15 +365,6 @@ class Trainer:
                 current_iou = current_metrics["iou"]
 
                 pbar.set_postfix({"loss": f"{step_loss:.4f}", "iou": f"{current_iou:.4f}"})
-
-                if self.log_interval > 0 and (step + 1) % self.log_interval == 0:
-                    total_str = f"/{total_batches}" if total_batches and total_batches > 0 else ""
-                    logger.info(
-                        f"Epoch [{epoch:02d}/{self.epochs:02d}] "
-                        f"Step [{step + 1}{total_str}] "
-                        f"Train Loss: {step_loss:.4f} | "
-                        f"Train IoU: {current_iou:.4f}"
-                    )
             except Exception as e:
                 logger.error(f"❌ Training step failed at epoch {epoch}, step {self.global_step}: {e}", exc_info=True)
                 raise e
@@ -364,9 +403,22 @@ class Trainer:
             x_jax = jnp.asarray(x_np)
             mask_jax = jnp.asarray(mask_gt)
 
-            variables = {"params": self.state.params}
-            if self.state.batch_stats is not None:
-                variables["batch_stats"] = self.state.batch_stats
+            if self.compute_dtype != jnp.float32:
+                x_jax = x_jax.astype(self.compute_dtype)
+                params_comp = jax.tree_util.tree_map(
+                    lambda p: p.astype(self.compute_dtype) if jnp.issubdtype(p.dtype, jnp.floating) else p,
+                    self.state.params,
+                )
+                variables = {"params": params_comp}
+                if self.state.batch_stats is not None:
+                    variables["batch_stats"] = jax.tree_util.tree_map(
+                        lambda b: b.astype(self.compute_dtype) if jnp.issubdtype(b.dtype, jnp.floating) else b,
+                        self.state.batch_stats,
+                    )
+            else:
+                variables = {"params": self.state.params}
+                if self.state.batch_stats is not None:
+                    variables["batch_stats"] = self.state.batch_stats
 
             try:
                 if "latent" in batch_np and hasattr(model, "forward_cached"):
@@ -375,6 +427,7 @@ class Trainer:
                     out = model.apply(variables, x_jax, deterministic=True)
 
                 mask_logits = out[0] if isinstance(out, tuple) else out
+                mask_logits = mask_logits.astype(jnp.float32)
                 loss, _ = mask_loss_fn(mask_logits, mask_jax)
                 val_losses.append(float(loss))
 
