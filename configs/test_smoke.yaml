@@ -1,0 +1,34 @@
+project:
+  name: "test_smoke"
+  seed: 42
+  output_dir: "outputs/test_smoke"
+
+data:
+  dataset_name: "mock"
+  image_size: [64, 64]
+  batch_size: 4
+  train_samples_per_epoch: 16
+  val_samples: 8
+  augmentations:
+    horizontal_flip: 0.5
+    vertical_flip: 0.0
+    random_rotate90: 0.25
+
+model:
+  name: "unet"
+  features: [16, 32, 64]
+  out_channels: 1
+  aux_classifier: false
+
+loss:
+  mask_loss_type: "combined"
+  bce_weight: 0.5
+  dice_weight: 0.5
+  focal_weight: 0.5
+
+training:
+  epochs: 1
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  save_best: true
+  save_latest: true

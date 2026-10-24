@@ -1,0 +1,39 @@
+project:
+  name: "diffusion_diff_experiment"
+  seed: 42
+  output_dir: "outputs/experiments/diffusion_diff"
+
+data:
+  dataset_name: "mock"
+  image_size: [256, 256]
+  batch_size: 8
+  train_samples_per_epoch: 64
+  val_samples: 32
+
+model:
+  name: "diffusion_diff"
+  timesteps: [100, 500, 900]
+  timestep_embed_dim: 32
+  sigma_embed_dim: 32
+  include_noisy_latents: true
+  include_added_noise: true
+  include_predicted_noise: true
+  include_noise_diff: true
+  include_z0: true
+  scaling_factor: 0.18215
+  is_efficient_backbone: true
+  decoder:
+    channels: [256, 128, 64, 32]
+  aux_classifier: false
+
+loss:
+  mask_loss_type: "combined"
+  bce_weight: 0.5
+  dice_weight: 0.5
+  focal_weight: 0.5
+
+training:
+  epochs: 5
+  learning_rate: 0.0001
+  save_best: true
+  save_latest: true

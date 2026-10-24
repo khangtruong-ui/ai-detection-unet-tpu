@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sid-unet-tpu"
+version = "0.1.0"
+description = "JAX/Flax implementation of SID-UNet and Diffusion-Diff forensics segmentation for GPU and TPU (v5e-1, v5e-8)"
+readme = "README.md"
+authors = [{ name = "KhangTruong" }]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4.20",
+    "flax>=0.8.0",
+    "optax>=0.1.7",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "numpy>=1.22.0",
+    "pillow>=9.0.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.65.0",
+    "scikit-learn>=1.0.0",
+    "safetensors>=0.4.0",
+    "psutil>=5.9.0",
+    "pyarrow>=12.0.0",
+    "datasets>=2.14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-timeout>=2.2.0",
+]
+diffusion = [
+    "diffusers>=0.25.0",
+    "transformers>=4.36.0",
+]
+
+[project.scripts]
+sid-train = "sid_unet.train:cli_main"
+sid-cache = "sid_unet.cache.cli:cli_main"
+sid-dataset-cache = "sid_unet.cache.cli:cli_main"
+sid-kill = "sid_unet.kill:cli_main"
+sid-eval = "sid_unet.evaluate:cli_main"
+sid-predict = "sid_unet.predict:cli_main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sid_unet*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+timeout = 240
+addopts = "-v --tb=short --timeout=240"

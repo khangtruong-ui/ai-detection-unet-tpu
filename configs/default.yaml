@@ -1,0 +1,53 @@
+project:
+  name: "sid_unet_tpu"
+  seed: 42
+  output_dir: "outputs/default_run"
+
+data:
+  dataset_name: "mock"
+  image_size: [256, 256]
+  batch_size: 8
+  train_samples_per_epoch: 64
+  val_samples: 32
+  augmentations:
+    horizontal_flip: 0.5
+    vertical_flip: 0.0
+    random_rotate90: 0.25
+
+model:
+  name: "diffusion_diff_minimized"
+  timesteps: [250]
+  timestep_embed_dim: 32
+  sigma_embed_dim: 32
+  include_noisy_latents: true
+  include_added_noise: true
+  include_predicted_noise: true
+  include_noise_diff: true
+  include_z0: true
+  scaling_factor: 0.18215
+  is_efficient_backbone: true
+  decoder:
+    channels: [256, 128, 64, 32]
+  aux_classifier: true
+  num_classes: 3
+
+loss:
+  mask_loss_type: "combined"
+  bce_weight: 0.5
+  dice_weight: 0.5
+  focal_weight: 0.5
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  aux_weight: 0.2
+
+training:
+  epochs: 5
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  warmup_steps: 10
+  total_steps: 500
+  early_stopping_patience: 3
+  early_stopping_metric: "val_iou"
+  early_stopping_mode: "max"
+  save_best: true
+  save_latest: true
