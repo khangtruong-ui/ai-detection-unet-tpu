@@ -83,19 +83,27 @@ class Trainer:
         self.epochs = int(tr_cfg.get("epochs", 10))
         self.lr = float(tr_cfg.get("learning_rate", 1e-4))
         self.weight_decay = float(tr_cfg.get("weight_decay", 1e-4))
+        clip_norm = float(tr_cfg.get("grad_clip_norm", 1.0))
 
         # 4. Optimizer and Schedule
-        warmup_steps = int(tr_cfg.get("warmup_steps", 100))
+        warmup_steps = tr_cfg.get("warmup_steps")
+        if warmup_steps is None:
+            warmup_epochs = int(tr_cfg.get("warmup_epochs", 1))
+            warmup_steps = max(10, warmup_epochs * 50)
+        else:
+            warmup_steps = int(warmup_steps)
+
         total_steps = int(tr_cfg.get("total_steps", 10000))
+        min_lr = float(tr_cfg.get("min_lr", self.lr * 0.01))
         schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
             peak_value=self.lr,
             warmup_steps=warmup_steps,
             decay_steps=total_steps,
-            end_value=self.lr * 0.01,
+            end_value=min_lr,
         )
         self.tx = optax.chain(
-            optax.clip_by_global_norm(1.0),
+            optax.clip_by_global_norm(clip_norm),
             optax.adamw(learning_rate=schedule, weight_decay=self.weight_decay),
         )
 

@@ -1,34 +1,57 @@
 project:
-  name: "test_smoke"
+  name: "sid_unet_smoke_test"
   seed: 42
-  output_dir: "outputs/test_smoke"
+  device: "auto"
+  output_dir: "outputs/smoke_test"
 
 data:
-  dataset_name: "mock"
-  image_size: [64, 64]
-  batch_size: 4
-  train_samples_per_epoch: 16
-  val_samples: 8
+  dataset_name: "KhangTruong/COCO-inpainted"
+  streaming: true
+  image_size: [128, 128]
+  batch_size: 16
+  num_workers: 0
+  pin_memory: false
+  train_split: "train"
+  val_split: "validation"
+  test_split: "test"
+  train_samples_per_epoch: 4
+  val_samples: 2
+  test_samples: 2
   augmentations:
     horizontal_flip: 0.5
     vertical_flip: 0.0
-    random_rotate90: 0.25
+    random_rotate90: 0.0
 
 model:
   name: "unet"
-  features: [16, 32, 64]
+  in_channels: 3
   out_channels: 1
+  features: [16, 32, 64]
+  bilinear: true
+  dropout: 0.0
   aux_classifier: false
+  num_classes: 3
 
 loss:
   mask_loss_type: "combined"
   bce_weight: 0.5
   dice_weight: 0.5
   focal_weight: 0.5
+  aux_loss_type: "cross_entropy"
+  aux_weight: 0.2
 
 training:
   epochs: 1
   learning_rate: 0.001
   weight_decay: 0.0001
+  optimizer: "adamw"
+  scheduler: "cosine"
+  amp: false
   save_best: true
   save_latest: true
+  early_stopping_patience: 2
+  early_stopping_metric: "val_iou"
+  early_stopping_mode: "max"
+
+logging:
+  log_interval: 1

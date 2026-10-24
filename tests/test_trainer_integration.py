@@ -13,6 +13,7 @@ def test_trainer_smoke_run(tmp_path):
         "configs/test_smoke.yaml",
         overrides=[
             f"project.output_dir={out_dir}",
+            "data.dataset_name=mock",
             "training.epochs=2",
             "data.train_samples_per_epoch=16",
             "data.val_samples=8",
@@ -36,6 +37,7 @@ def test_trainer_smoke_run(tmp_path):
         overrides=[
             f"project.output_dir={out_dir}",
             f"training.resume={latest_ckpt}",
+            "data.dataset_name=mock",
             "training.epochs=3",
             "data.train_samples_per_epoch=16",
             "data.val_samples=8",

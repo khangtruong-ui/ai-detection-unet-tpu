@@ -1,57 +1,105 @@
 project:
-  name: "sid_unet_tpu"
+  name: "sid_unet_baseline"
   seed: 42
-  output_dir: "outputs/default_run"
+  device: "auto"
+  output_dir: "outputs"
 
 data:
   dataset_name: "KhangTruong/COCO-inpainted"
-  image_size: [512, 512]
-  num_workers: -1
-  batch_size: 8
   streaming: true
+  image_size: [512, 512]
+  batch_size: 16
+  num_workers: -1
+  pin_memory: true
+  shuffle_buffer_size: 1000
   train_split: "train"
   val_split: "validation"
-  train_samples_per_epoch: 2000
-  val_samples: 400
+  test_split: "test"
+  train_samples_per_epoch: -1  # Set to -1 or negative to run until dataset is depleted
+  val_samples_per_epoch: -1    # Set to -1 or negative to run until dataset is depleted
+  val_samples: -1              # Alias for val_samples_per_epoch
+  test_samples: -1             # Set to -1 or negative to run until dataset is depleted
+  use_parquet_loader: true     # Use parquet-dataset-loader for non-blocking index streaming
+  save_to_disk: false          # Progressively persist streamed row groups to disk
+  background_download: false   # Download parquet files/row groups in background thread
+  columns: null                # Optional column projection (e.g. ['image', 'mask'])
+  token: null                  # Hugging Face auth token (or True to use stored auth)
   augmentations:
     horizontal_flip: 0.5
-    vertical_flip: 0.0
-    random_rotate90: 0.25
+    vertical_flip: 0.2
+    random_rotate90: 0.5
 
 model:
-  name: "diffusion_diff_minimized"
-  timesteps: [250]
-  timestep_embed_dim: 32
-  sigma_embed_dim: 32
-  include_noisy_latents: true
-  include_added_noise: true
-  include_predicted_noise: true
-  include_noise_diff: true
-  include_z0: true
-  scaling_factor: 0.18215
-  is_efficient_backbone: true
-  decoder:
-    channels: [256, 128, 64, 32]
-  aux_classifier: true
+  name: "unet"
+  in_channels: 3
+  out_channels: 1
+  features: [64, 128, 256, 512]
+  bilinear: true
+  dropout: 0.1
+  aux_classifier: false
   num_classes: 3
 
 loss:
-  mask_loss_type: "combined"
+  mask_loss_type: "combined" # 'bce', 'dice', 'focal', 'combined'
   bce_weight: 0.5
   dice_weight: 0.5
   focal_weight: 0.5
   focal_gamma: 2.0
   focal_alpha: 0.25
+  aux_loss_type: "cross_entropy"
   aux_weight: 0.2
 
 training:
-  epochs: 5
-  learning_rate: 0.0001
+  epochs: 10
+  learning_rate: 0.001
   weight_decay: 0.0001
-  warmup_steps: 10
-  total_steps: 500
-  early_stopping_patience: 3
-  early_stopping_metric: "val_iou"
-  early_stopping_mode: "max"
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 1
+  min_lr: 0.000001
+  grad_clip_norm: 1.0
+  amp: true
   save_best: true
   save_latest: true
+  checkpoint_period: 3600      # Periodic checkpoint interval in seconds (default: 3600 = 1 hour)
+  checkpoint_steps: null       # Optional periodic checkpoint step interval (e.g. 100)
+  eval_interval: 1
+  early_stopping_patience: 5
+  early_stopping_metric: "val_iou"
+  early_stopping_mode: "max"
+  push_to_hub: false           # Set to true (or pass --push-to-hub / --hf-repo) to checkpoint to Hugging Face Hub
+  hub_repo: null               # Hugging Face repository ID (e.g. 'KhangTruong/Testing-model')
+  hub_version: "v1"            # Hugging Face version tag (e.g. 'v1', 'v2')
+
+bootstrapping:
+  enabled: false               # Default: no bootstrapping (set to true to enable Bootstrapping v1.0 kickstarting)
+  run_bootstrap: false         # Alias for enabled
+  epochs: 5                    # bootstrap_epochs: number of kickstart epochs on sample subset
+  num_samples: 512             # bootstrap_examples: sample subset size (e.g. 512, 1024, 2048)
+  batch_size: null             # Kickstart batch size (defaults to data.batch_size if null)
+  learning_rate: null          # Kickstart learning rate (defaults to training.learning_rate if null)
+  freeze_strategy: "channel_stream" # "channel_stream" (default: end-to-end stream), "dimension_stream", "whole_layer", "custom"
+  stream_ratio: 0.5            # Active core stream ratio (e.g. 0.5 = first 50% channels active, last 50% frozen & zeroed)
+  release_mode: "restore"      # "restore" (restore pre-bootstrap weights for tail), "calibrated", or "zero"
+  freeze_modules: []           # Custom module name patterns to freeze when freeze_strategy="custom"
+  initialization: "kaiming_normal" # "kaiming_normal", "kaiming_uniform", "xavier_normal", "xavier_uniform", "none"
+  target_score: 0.50           # Target metric score to achieve before early release
+  min_loss_drop: 0.15          # Minimum relative loss drop (15%) for acceptable kickstart fit
+  early_stopping: false        # Do not stop early by default in bootstrap
+  patience: 3                  # Early stopping patience during kickstart
+
+hard_mining:
+  enabled: false               # Default: no hard mining (set to true to enable hard example mining from epoch 2)
+  metric: "median"             # "median" or "mean" loss threshold
+  reset_epochs: 5              # Reset hard mining and repeat full training after 5 epochs
+
+logging:
+  log_interval: 20
+
+post_processing:
+  enabled: true
+  min_area: 64
+  fill_holes: true
+  max_hole_size: 256
+  morphology: "open_close"
+  morph_kernel_size: 3

@@ -127,13 +127,19 @@ ai-detection-unet-tpu/
 ├── pyproject.toml              # Build metadata, scripts, dependencies
 ├── setup.py                    # Setuptools integration
 ├── README.md                   # Complete documentation
-├── configs/                    # YAML configuration files
+├── configs/                    # YAML configuration files (fully aligned with ai-detection-unet-gpu)
 │   ├── default.yaml
+│   ├── train_streaming.yaml
+│   ├── train_non_streaming.yaml
+│   ├── evaluate.yaml
 │   ├── test_smoke.yaml
+│   ├── test_quick.yaml
+│   ├── cross-eval/             # Benchmark evaluation configs (diffseg30k, casia, cocoglide, etc.)
 │   └── experiments/
-│       ├── diffusion_diff/default.yaml
-│       ├── diffusion_diff_v2/default.yaml
-│       └── diffusion_diff_minimized/default.yaml
+│       ├── diffusion_diff/
+│       ├── diffusion_diff_v2/
+│       ├── diffusion_diff_minimized/
+│       └── unet_scratch/
 ├── sid_unet/
 │   ├── __init__.py
 │   ├── train.py                # sid-train CLI entrypoint

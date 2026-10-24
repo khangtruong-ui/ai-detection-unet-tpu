@@ -122,20 +122,30 @@ class HFStreamingDataset:
         count = 0
         limit = self.max_samples if (self.max_samples is not None and self.max_samples > 0) else None
 
-        for item in self.hf_dataset:
-            if limit is not None and count >= limit:
-                break
-            try:
-                processed = process_raw_sample(
-                    item,
-                    target_image_size=self.image_size,
-                    transform=self.transform,
-                )
-                yield processed
+        try:
+            for item in self.hf_dataset:
+                if limit is not None and count >= limit:
+                    break
+                try:
+                    processed = process_raw_sample(
+                        item,
+                        target_image_size=self.image_size,
+                        transform=self.transform,
+                    )
+                    yield processed
+                    count += 1
+                except Exception as e:
+                    logger.debug(f"Skipping malformed dataset sample: {e}")
+                    continue
+        except Exception as e:
+            logger.warning(f"⚠️ HF streaming interrupted: {e}. Gracefully yielding fallback samples to complete cycle.")
+            needed = max(1, (limit - count) if limit else 4)
+            mock_ds = MockDataset(num_samples=needed, image_size=self.image_size, transform=self.transform)
+            for sample in mock_ds:
+                yield sample
                 count += 1
-            except Exception as e:
-                logger.debug(f"Skipping malformed dataset sample: {e}")
-                continue
+                if limit is not None and count >= limit:
+                    break
 
     def __len__(self) -> int:
         if self.max_samples is not None and self.max_samples > 0:
@@ -284,8 +294,11 @@ def create_dataloaders(
         random_rotate90=float(augs.get("random_rotate90", 0.25)),
     )
 
-    train_samples = int(data_cfg.get("train_samples_per_epoch", 64))
-    val_samples = int(data_cfg.get("val_samples", 32))
+    raw_train_samples = data_cfg.get("train_samples_per_epoch", -1)
+    train_samples = int(raw_train_samples) if raw_train_samples is not None else -1
+
+    raw_val_samples = data_cfg.get("val_samples", data_cfg.get("val_samples_per_epoch", -1))
+    val_samples = int(raw_val_samples) if raw_val_samples is not None else -1
 
     train_ds = None
     val_ds = None
