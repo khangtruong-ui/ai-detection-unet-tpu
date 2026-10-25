@@ -7,13 +7,16 @@ from PIL import Image
 
 from sid_unet.dataset.transforms import SpatialJointTransform
 from sid_unet.dataset.loader import (
-    MockDataset,
+    DataLoader,
     DataLoaderIterator,
+    MockDataset,
+    ParquetForensicsDataset,
+    create_dataloaders,
+    numpy_collate,
+    process_raw_sample,
     resolve_num_workers,
     resolve_sample_limit,
     safe_dataloader_len,
-    process_raw_sample,
-    create_dataloaders,
 )
 from sid_unet.cache.manager import DatasetCacheManager
 from sid_unet.cache.dataset import CachedShardDataset
@@ -171,3 +174,92 @@ def test_create_dataloaders_steps_per_epoch_override():
     )
     train_loader, val_loader, _ = create_dataloaders(cfg)
     assert safe_dataloader_len(train_loader) == 5
+
+
+@pytest.mark.timeout(60)
+def test_process_raw_sample_bytes_and_dict():
+    """Verify process_raw_sample handles raw byte buffers and dict payloads from Parquet."""
+    import io
+    import torch
+
+    img = Image.new("RGB", (64, 64), color=(50, 150, 250))
+    mask = Image.new("L", (64, 64), color=255)
+
+    buf_img = io.BytesIO()
+    img.save(buf_img, format="PNG")
+    img_bytes = buf_img.getvalue()
+
+    buf_mask = io.BytesIO()
+    mask.save(buf_mask, format="PNG")
+    mask_bytes = buf_mask.getvalue()
+
+    # Dictionary containing bytes (standard Hugging Face Parquet struct format)
+    sample_dict = {
+        "image": {"bytes": img_bytes, "path": "test.png"},
+        "mask": {"bytes": mask_bytes, "path": "mask.png"},
+    }
+    res_dict = process_raw_sample(sample_dict, target_image_size=(32, 32))
+    assert res_dict["image"].shape == (32, 32, 3)
+    assert res_dict["mask"].shape == (32, 32, 1)
+    assert res_dict["label"][0] == 1  # All white mask -> synthetic (1)
+    assert isinstance(res_dict["image"], np.ndarray)
+
+    # Raw bytes directly
+    sample_raw = {"image": img_bytes, "mask": mask_bytes}
+    res_raw = process_raw_sample(sample_raw, target_image_size=(32, 32))
+    assert res_raw["image"].shape == (32, 32, 3)
+    assert res_raw["mask"].shape == (32, 32, 1)
+
+
+@pytest.mark.timeout(60)
+def test_parquet_forensics_dataset_wrapper():
+    """Verify ParquetForensicsDataset wraps indexable records with on-the-fly transform."""
+    mock_parquet_rows = [
+        {"image": Image.new("RGB", (32, 32), color=(i, i, i)), "mask": Image.new("L", (32, 32), color=0)}
+        for i in range(10)
+    ]
+
+    pds = ParquetForensicsDataset(
+        mock_parquet_rows,
+        image_size=(64, 64),
+        max_samples=6,
+    )
+    assert len(pds) == 6
+
+    item0 = pds[0]
+    assert item0["image"].shape == (64, 64, 3)
+    assert item0["mask"].shape == (64, 64, 1)
+    assert item0["label"][0] == 0
+
+    # Slicing
+    slice_items = pds[1:4]
+    assert len(slice_items) == 3
+    assert slice_items[0]["image"].shape == (64, 64, 3)
+
+
+@pytest.mark.timeout(60)
+def test_parquet_dataloader_api_features():
+    """Verify DataLoader supports benchmark, bottleneck diagnostics, and pure NumPy collation."""
+    import torch
+
+    ds = MockDataset(num_samples=16, image_size=(64, 64), is_cached=False)
+    loader = DataLoader(ds, batch_size=4, shuffle=True, collate_fn="numpy", num_workers=2)
+
+    # Verify collation returns NumPy arrays, not torch.Tensor
+    batch = next(iter(loader))
+    assert isinstance(batch["image"], np.ndarray)
+    assert not isinstance(batch["image"], torch.Tensor)
+    assert batch["image"].shape == (4, 64, 64, 3)
+
+    # Verify benchmarking API
+    bench_result = loader.benchmark(num_batches=2, warmup=0, show_summary=False)
+    assert "batches_per_sec" in bench_result
+    assert bench_result["total_batches"] == 2
+
+    # Verify debug & bottleneck diagnosis API
+    loader.enable_debug()
+    for _ in loader:
+        pass
+    diagnosis = loader.view_bottleneck()
+    assert "primary_bottleneck" in diagnosis
+    loader.disable_debug()

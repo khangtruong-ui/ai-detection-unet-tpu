@@ -15,7 +15,12 @@ import numpy as np
 import optax
 from tqdm import tqdm
 
-from sid_unet.dataset.loader import DataLoaderIterator, create_dataloaders, safe_dataloader_len
+from sid_unet.dataset.loader import (
+    DataLoader,
+    DataLoaderIterator,
+    create_dataloaders,
+    safe_dataloader_len,
+)
 from sid_unet.losses.auxiliary import AuxiliaryLoss
 from sid_unet.losses.combined import CombinedMaskLoss
 from sid_unet.metrics.segmentation import RunningSegmentationMetrics
@@ -197,7 +202,7 @@ class Trainer:
         except Exception as e:
             logger.warning(f"Could not load resume checkpoint from {checkpoint_path}: {e}")
 
-    def train_epoch(self, train_loader: DataLoaderIterator, epoch: int) -> Dict[str, float]:
+    def train_epoch(self, train_loader: Union[DataLoader, DataLoaderIterator], epoch: int) -> Dict[str, float]:
         """Execute one complete training epoch."""
         model = self.model
         mask_loss_fn = self.mask_loss_fn
@@ -379,7 +384,7 @@ class Trainer:
             "train_accuracy": computed["accuracy"],
         }
 
-    def validate(self, val_loader: DataLoaderIterator, epoch: Optional[int] = None) -> Dict[str, float]:
+    def validate(self, val_loader: Union[DataLoader, DataLoaderIterator], epoch: Optional[int] = None) -> Dict[str, float]:
         """Evaluate model across validation dataset and compute segmentation metrics."""
         model = self.model
         mask_loss_fn = self.mask_loss_fn
@@ -469,6 +474,8 @@ class Trainer:
 
         try:
             for epoch in range(self.start_epoch, self.epochs + 1):
+                if hasattr(train_loader, "set_epoch"):
+                    train_loader.set_epoch(epoch)
                 t0 = time.time()
                 train_res = self.train_epoch(train_loader, epoch=epoch)
                 val_res = self.validate(val_loader, epoch=epoch) if val_loader else {}
@@ -522,6 +529,17 @@ class Trainer:
                 logger.info("✅ Emergency checkpoint saved to checkpoint_latest.pt.")
             except Exception as e:
                 logger.error(f"Failed to save emergency checkpoint: {e}")
+        finally:
+            if hasattr(train_loader, "close"):
+                try:
+                    train_loader.close()
+                except Exception:
+                    pass
+            if val_loader is not None and hasattr(val_loader, "close"):
+                try:
+                    val_loader.close()
+                except Exception:
+                    pass
 
         logger.info(f"🎉 Training run complete! Best Val IoU: {best_val_iou:.4f}")
         return {
