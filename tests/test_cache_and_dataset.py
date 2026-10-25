@@ -292,3 +292,40 @@ def test_parquet_forensics_dataset_row_groups_and_dataloader_block_shuffle():
     assert len(batches) == 3
     assert batches[0]["image"].shape == (5, 512, 512, 3)
 
+
+@pytest.mark.timeout(60)
+def test_parquet_forensics_dataset_file_indices_and_forward_cache_config():
+    """Verify ParquetForensicsDataset exposes file indices and configuration supports forward caching."""
+    from parquet_dataset_loader.dataset import BlockShuffledSampler
+
+    class MockMultiFileInnerDataset:
+        def __len__(self):
+            return 30
+        def __getitem__(self, idx):
+            return {"image": Image.new("RGB", (16, 16)), "mask": Image.new("L", (16, 16))}
+        def get_row_group_indices(self):
+            return [list(range(0, 10)), list(range(10, 20)), list(range(20, 30))]
+        def get_row_group_file_indices(self):
+            return [0, 1, 2]
+
+    inner = MockMultiFileInnerDataset()
+    pds = ParquetForensicsDataset(inner)
+    assert pds.get_row_group_file_indices() == [0, 1, 2]
+
+    sampler = BlockShuffledSampler(pds, seed=42, shuffle=True)
+    assert sampler.file_indices == [0, 1, 2]
+    indices = list(sampler)
+    assert len(indices) == 30
+    assert set(indices) == set(range(30))
+
+    # Verify config loading with forward caching options
+    cfg = load_config(
+        "configs/experiments/diffusion_diff_minimized/default_512.yaml",
+        overrides=["data.dataset_name=mock", "data.train_samples_per_epoch=16", "data.val_samples=8"],
+    )
+    assert cfg.data.cache_files is True
+    assert cfg.data.max_cached_files == 4
+    assert cfg.data.max_cache_gb == 6.0
+    train_loader, val_loader, _ = create_dataloaders(cfg)
+    assert len(train_loader) == 2
+

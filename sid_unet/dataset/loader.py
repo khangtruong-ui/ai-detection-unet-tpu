@@ -332,6 +332,14 @@ class ParquetForensicsDataset(collections.abc.Sequence):
             return filtered
         return [list(range(len(self)))]
 
+    def get_row_group_file_indices(self) -> List[int]:
+        """Return row group file indices from underlying Parquet dataset filtered by max_samples."""
+        if hasattr(self.parquet_dataset, "get_row_group_file_indices"):
+            f_indices = self.parquet_dataset.get_row_group_file_indices()
+            valid_groups = len(self.get_row_group_indices())
+            return f_indices[:valid_groups]
+        return [0] * len(self.get_row_group_indices())
+
 
 class DataLoaderIterator(DataLoader):
     """Batch generator over dataset with multi-worker prefetching and robust collation.
@@ -445,6 +453,9 @@ def create_dataloaders(
         streaming = bool(data_cfg.get("streaming", True))
         save_to_disk = bool(data_cfg.get("save_to_disk", False))
         background_download = bool(data_cfg.get("background_download", False))
+        cache_files = bool(data_cfg.get("cache_files", streaming))
+        max_cached_files = data_cfg.get("max_cached_files", 4 if streaming else None)
+        max_cache_gb = data_cfg.get("max_cache_gb", None)
         columns = data_cfg.get("columns", None)
         token = data_cfg.get("token", None)
         train_split = str(data_cfg.get("train_split", "train"))
@@ -453,7 +464,7 @@ def create_dataloaders(
         if use_parquet:
             try:
                 import parquet_dataset_loader as pdl
-                logger.info(f"🌐 Loading dataset '{dataset_name}' with parquet-dataset-loader (split='{train_split}')...")
+                logger.info(f"🌐 Loading dataset '{dataset_name}' with parquet-dataset-loader (split='{train_split}', cache_files={cache_files}, max_cached_files={max_cached_files})...")
                 pdl_train = pdl.load_dataset(
                     path=dataset_name,
                     split=train_split,
@@ -462,6 +473,9 @@ def create_dataloaders(
                     token=token,
                     save_to_disk=save_to_disk,
                     background_download=background_download,
+                    cache_files=cache_files,
+                    max_cached_files=max_cached_files,
+                    max_cache_gb=max_cache_gb,
                 )
                 train_ds = ParquetForensicsDataset(
                     pdl_train,
@@ -478,6 +492,9 @@ def create_dataloaders(
                         token=token,
                         save_to_disk=save_to_disk,
                         background_download=background_download,
+                        cache_files=cache_files,
+                        max_cached_files=max_cached_files,
+                        max_cache_gb=max_cache_gb,
                     )
                     val_ds = ParquetForensicsDataset(
                         pdl_val,
