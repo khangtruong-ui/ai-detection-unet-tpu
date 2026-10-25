@@ -25,8 +25,14 @@ dependencies = [
     "psutil>=5.9.0",
     "pyarrow>=12.0.0",
     "datasets>=2.14.0",
+    "parquet-dataset-loader @ git+https://github.com/khangtruong-ui/parquet-dataset-loader.git",
     "jax-model-zoo @ git+https://github.com/khangtruong-ui/jax-model-zoo.git",
 ]
+
+[project.urls]
+Homepage = "https://github.com/khangtruong-ui/ai-detection-unet-tpu"
+Repository = "https://github.com/khangtruong-ui/ai-detection-unet-tpu"
+"Parquet Dataset Loader" = "https://github.com/khangtruong-ui/parquet-dataset-loader"
 
 [project.optional-dependencies]
 dev = [

@@ -6,6 +6,7 @@ cached tensor datasets, and fast synthetic mock datasets with multi-worker paral
 
 from __future__ import annotations
 
+import collections.abc
 import concurrent.futures
 import itertools
 import logging
@@ -15,6 +16,12 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 import numpy as np
 from PIL import Image
 
+from parquet_dataset_loader import (
+    DataLoader,
+    default_collate,
+    numpy_collate,
+    safe_dataloader_len,
+)
 from sid_unet.dataset.transforms import SpatialJointTransform
 from sid_unet.dataset.mask_utils import process_mask
 
@@ -89,7 +96,15 @@ def process_raw_sample(
     h, w = target_image_size
 
     raw_img = sample.get("image")
-    if isinstance(raw_img, Image.Image):
+    if isinstance(raw_img, collections.abc.Mapping) and "bytes" in raw_img:
+        raw_img = raw_img["bytes"]
+    if isinstance(raw_img, (bytes, bytearray)):
+        import io
+        try:
+            pil_img = Image.open(io.BytesIO(raw_img)).convert("RGB")
+        except Exception:
+            pil_img = Image.new("RGB", (w, h), color=(128, 128, 128))
+    elif isinstance(raw_img, Image.Image):
         pil_img = raw_img.convert("RGB")
     elif isinstance(raw_img, np.ndarray):
         pil_img = Image.fromarray(raw_img).convert("RGB")
@@ -102,7 +117,15 @@ def process_raw_sample(
     img_arr = (np.array(pil_img, dtype=np.float32) / 127.5) - 1.0  # Normalized to [-1, 1]
 
     raw_mask = sample.get("mask")
-    if isinstance(raw_mask, Image.Image):
+    if isinstance(raw_mask, collections.abc.Mapping) and "bytes" in raw_mask:
+        raw_mask = raw_mask["bytes"]
+    if isinstance(raw_mask, (bytes, bytearray)):
+        import io
+        try:
+            pil_mask = Image.open(io.BytesIO(raw_mask)).convert("L")
+        except Exception:
+            pil_mask = Image.new("L", (w, h), color=0)
+    elif isinstance(raw_mask, Image.Image):
         pil_mask = raw_mask.convert("L")
     elif isinstance(raw_mask, np.ndarray):
         pil_mask = Image.fromarray(raw_mask).convert("L")
@@ -247,8 +270,74 @@ class MockDataset:
         return {"image": image, "mask": mask, "label": np.array([label], dtype=np.int32)}
 
 
-class DataLoaderIterator:
-    """Batch generator over dataset with multi-worker prefetching and collation."""
+class ParquetForensicsDataset(collections.abc.Sequence):
+    """Forensics dataset adapter wrapping an IndexedParquetDataset.
+
+    Applies `process_raw_sample` with spatial joint transforms and target sizing on the fly.
+    Supports random access indexing, slicing, and length queries.
+    """
+
+    def __init__(
+        self,
+        parquet_dataset: Any,
+        image_size: Tuple[int, int] = (512, 512),
+        max_samples: Optional[int] = None,
+        transform: Optional[SpatialJointTransform] = None,
+    ):
+        self.parquet_dataset = parquet_dataset
+        self.image_size = image_size
+        self.max_samples = max_samples
+        self.transform = transform
+
+    def __len__(self) -> int:
+        total = len(self.parquet_dataset)
+        if self.max_samples is not None and self.max_samples > 0:
+            return min(total, self.max_samples)
+        return total
+
+    def __getitem__(self, idx: Union[int, slice, Sequence[int]]) -> Any:
+        if isinstance(idx, int):
+            if idx < 0:
+                idx += len(self)
+            if idx < 0 or idx >= len(self):
+                raise IndexError(f"Index {idx} out of range for dataset of length {len(self)}")
+            raw = self.parquet_dataset[idx]
+            return process_raw_sample(
+                raw,
+                target_image_size=self.image_size,
+                transform=self.transform,
+            )
+        elif isinstance(idx, slice):
+            start, stop, step = idx.indices(len(self))
+            return [self[i] for i in range(start, stop, step)]
+        elif isinstance(idx, (list, tuple)):
+            return [self[i] for i in idx]
+        else:
+            raise TypeError(f"Invalid index type for {type(self).__name__}: {type(idx)}")
+
+    @property
+    def pdl_dataset(self) -> Any:
+        return self.parquet_dataset
+
+    def get_row_group_indices(self) -> List[List[int]]:
+        """Return row group indices from underlying Parquet dataset filtered by max_samples."""
+        if hasattr(self.parquet_dataset, "get_row_group_indices"):
+            groups = self.parquet_dataset.get_row_group_indices()
+            total = len(self)
+            filtered = []
+            for g in groups:
+                valid_g = [i for i in g if i < total]
+                if valid_g:
+                    filtered.append(valid_g)
+            return filtered
+        return [list(range(len(self)))]
+
+
+class DataLoaderIterator(DataLoader):
+    """Batch generator over dataset with multi-worker prefetching and robust collation.
+
+    Drop-in subclass of parquet_dataset_loader.DataLoader configured for JAX/Flax workloads.
+    """
 
     def __init__(
         self,
@@ -258,113 +347,42 @@ class DataLoaderIterator:
         drop_last: bool = False,
         num_workers: Optional[int] = None,
         prefetch_batches: int = 4,
+        collate_fn: Optional[Callable[[Any], Any]] = None,
+        timeout: float = 120.0,
+        worker_type: str = "auto",
+        pin_memory: bool = False,
+        debug: bool = False,
+        seed: Optional[int] = None,
+        **kwargs: Any,
     ):
-        self.dataset = dataset
-        self.batch_size = max(1, batch_size)
-        self.shuffle = shuffle
-        self.drop_last = drop_last
-        self.num_workers = resolve_num_workers(num_workers)
-        self.prefetch_batches = max(2, int(prefetch_batches))
-        self._is_map = hasattr(dataset, "__getitem__") and hasattr(dataset, "__len__")
-
-    def __len__(self) -> int:
-        if self._is_map:
-            total = len(self.dataset)
-            if self.drop_last:
-                return total // self.batch_size
-            return math.ceil(total / self.batch_size)
-        if hasattr(self.dataset, "__len__"):
-            try:
-                total = len(self.dataset)
-                if total is not None and total > 0:
-                    if self.drop_last:
-                        return total // self.batch_size
-                    return math.ceil(total / self.batch_size)
-            except (TypeError, NotImplementedError):
-                pass
-        raise TypeError(f"'{type(self).__name__}' object has no static len() for streaming dataset")
-
-    def __iter__(self) -> Iterator[Dict[str, np.ndarray]]:
-        if self._is_map:
-            indices = list(range(len(self.dataset)))
-            if self.shuffle:
-                np.random.shuffle(indices)
-
-            # When multi-worker is enabled and dataset is indexable, use parallel batch workers
-            if self.num_workers > 1:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                    for start_idx in range(0, len(indices), self.batch_size):
-                        batch_idxs = indices[start_idx : start_idx + self.batch_size]
-                        if self.drop_last and len(batch_idxs) < self.batch_size:
-                            break
-
-                        items = list(executor.map(lambda i: self.dataset[i], batch_idxs))
-                        yield self._collate(items)
-            else:
-                for start_idx in range(0, len(indices), self.batch_size):
-                    batch_idxs = indices[start_idx : start_idx + self.batch_size]
-                    if self.drop_last and len(batch_idxs) < self.batch_size:
-                        break
-
-                    items = [self.dataset[i] for i in batch_idxs]
-                    yield self._collate(items)
-        else:
-            # Streaming iterable dataset with asynchronous background prefetching
-            import queue
-            import threading
-
-            q: queue.Queue = queue.Queue(maxsize=self.prefetch_batches)
-            stop_event = threading.Event()
-            sentinel = object()
-
-            def producer():
-                try:
-                    batch = []
-                    for item in self.dataset:
-                        if stop_event.is_set():
-                            break
-                        batch.append(item)
-                        if len(batch) == self.batch_size:
-                            collated = self._collate(batch)
-                            q.put(collated)
-                            batch = []
-                    if batch and not self.drop_last and not stop_event.is_set():
-                        q.put(self._collate(batch))
-                except Exception as exc:
-                    q.put(exc)
-                finally:
-                    q.put(sentinel)
-
-            t = threading.Thread(target=producer, daemon=True)
-            t.start()
-
-            try:
-                while True:
-                    item = q.get()
-                    if item is sentinel:
-                        break
-                    if isinstance(item, Exception):
-                        raise item
-                    yield item
-            finally:
-                stop_event.set()
-                while not q.empty():
-                    try:
-                        q.get_nowait()
-                    except queue.Empty:
-                        break
+        collator = collate_fn if collate_fn is not None else numpy_collate
+        resolved_workers = resolve_num_workers(num_workers)
+        prefetch_factor = max(1, prefetch_batches // max(1, resolved_workers)) if resolved_workers > 0 else 2
+        super().__init__(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=resolved_workers,
+            collate_fn=collator,
+            drop_last=drop_last,
+            timeout=timeout,
+            worker_type=worker_type,
+            prefetch_factor=prefetch_factor,
+            pin_memory=pin_memory,
+            debug=debug,
+            seed=seed,
+            **kwargs,
+        )
 
     def _collate(self, items: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
-        collated: Dict[str, np.ndarray] = {}
-        for k in items[0].keys():
-            collated[k] = np.stack([item[k] for item in items], axis=0)
-        return collated
+        """Backward-compatibility collate method."""
+        return self.collate_fn(items)
 
 
 def create_dataloaders(
     config: Any,
-) -> Tuple[DataLoaderIterator, Optional[DataLoaderIterator], Optional[DataLoaderIterator]]:
-    """Create train, validation, and test dataloaders from configuration."""
+) -> Tuple[DataLoader, Optional[DataLoader], Optional[DataLoader]]:
+    """Create train, validation, and test dataloaders from configuration using parquet-dataset-loader."""
     data_cfg = getattr(config, "data", {}) if hasattr(config, "data") else config.get("data", {})
     img_size = tuple(data_cfg.get("image_size", [512, 512]))
     batch_size = int(data_cfg.get("batch_size", 8))
@@ -408,28 +426,94 @@ def create_dataloaders(
     train_ds = None
     val_ds = None
 
-    # Load real dataset if not 'mock' or 'synthetic'
-    if dataset_name.lower() not in ("mock", "synthetic") and not is_cached:
-        try:
-            logger.info(f"🌐 Loading real dataset '{dataset_name}' from Hugging Face...")
-            train_ds = HFStreamingDataset(
-                dataset_name=dataset_name,
-                split=data_cfg.get("train_split", "train"),
-                image_size=img_size,
-                max_samples=train_max_samples,
-                transform=train_transform,
-            )
-            val_ds = HFStreamingDataset(
-                dataset_name=dataset_name,
-                split=data_cfg.get("val_split", "validation"),
-                image_size=img_size,
-                max_samples=val_max_samples,
-                transform=None,
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ Could not stream dataset '{dataset_name}' ({e}). Falling back to fast MockDataset.")
-            train_ds = None
-            val_ds = None
+    # Cached mode check
+    if is_cached:
+        cache_dir = data_cfg.get("cache_dir", None)
+        if cache_dir and os.path.exists(cache_dir):
+            import glob
+            from sid_unet.cache.dataset import CachedShardDataset
+            train_shards = glob.glob(os.path.join(cache_dir, "train", "*.npz"))
+            val_shards = glob.glob(os.path.join(cache_dir, "validation", "*.npz"))
+            if train_shards:
+                train_ds = CachedShardDataset(train_shards, transform=train_transform)
+            if val_shards:
+                val_ds = CachedShardDataset(val_shards, transform=None)
+
+    # Real dataset loading via parquet-dataset-loader
+    if train_ds is None and dataset_name.lower() not in ("mock", "synthetic") and not is_cached:
+        use_parquet = bool(data_cfg.get("use_parquet_loader", True))
+        streaming = bool(data_cfg.get("streaming", True))
+        save_to_disk = bool(data_cfg.get("save_to_disk", False))
+        background_download = bool(data_cfg.get("background_download", False))
+        columns = data_cfg.get("columns", None)
+        token = data_cfg.get("token", None)
+        train_split = str(data_cfg.get("train_split", "train"))
+        val_split = str(data_cfg.get("val_split", "validation"))
+
+        if use_parquet:
+            try:
+                import parquet_dataset_loader as pdl
+                logger.info(f"🌐 Loading dataset '{dataset_name}' with parquet-dataset-loader (split='{train_split}')...")
+                pdl_train = pdl.load_dataset(
+                    path=dataset_name,
+                    split=train_split,
+                    streaming=streaming,
+                    columns=columns,
+                    token=token,
+                    save_to_disk=save_to_disk,
+                    background_download=background_download,
+                )
+                train_ds = ParquetForensicsDataset(
+                    pdl_train,
+                    image_size=img_size,
+                    max_samples=train_max_samples,
+                    transform=train_transform,
+                )
+                try:
+                    pdl_val = pdl.load_dataset(
+                        path=dataset_name,
+                        split=val_split,
+                        streaming=streaming,
+                        columns=columns,
+                        token=token,
+                        save_to_disk=save_to_disk,
+                        background_download=background_download,
+                    )
+                    val_ds = ParquetForensicsDataset(
+                        pdl_val,
+                        image_size=img_size,
+                        max_samples=val_max_samples,
+                        transform=None,
+                    )
+                except Exception as ve:
+                    logger.debug(f"Could not load validation split '{val_split}': {ve}")
+                    val_ds = None
+            except Exception as e:
+                logger.warning(f"⚠️ parquet-dataset-loader could not load '{dataset_name}': {e}. Trying fallback...")
+                train_ds = None
+                val_ds = None
+
+        if train_ds is None:
+            try:
+                logger.info(f"🌐 Loading real dataset '{dataset_name}' from Hugging Face...")
+                train_ds = HFStreamingDataset(
+                    dataset_name=dataset_name,
+                    split=data_cfg.get("train_split", "train"),
+                    image_size=img_size,
+                    max_samples=train_max_samples,
+                    transform=train_transform,
+                )
+                val_ds = HFStreamingDataset(
+                    dataset_name=dataset_name,
+                    split=data_cfg.get("val_split", "validation"),
+                    image_size=img_size,
+                    max_samples=val_max_samples,
+                    transform=None,
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Could not stream dataset '{dataset_name}' ({e}). Falling back to fast MockDataset.")
+                train_ds = None
+                val_ds = None
 
     if train_ds is None:
         t_samples = train_max_samples if (train_max_samples is not None and train_max_samples > 0) else 64
@@ -444,7 +528,33 @@ def create_dataloaders(
         train_ds = MockDataset(num_samples=t_samples, image_size=img_size, is_cached=is_cached, latent_channels=latent_channels, transform=train_transform)
         val_ds = MockDataset(num_samples=v_samples, image_size=img_size, is_cached=is_cached, latent_channels=latent_channels, transform=None)
 
-    train_loader = DataLoaderIterator(train_ds, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=num_workers, prefetch_batches=prefetch_batches)
-    val_loader = DataLoaderIterator(val_ds, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers, prefetch_batches=prefetch_batches)
+    timeout = float(data_cfg.get("timeout", 180.0))
+
+    train_loader = DataLoaderIterator(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True,
+        num_workers=num_workers,
+        prefetch_batches=prefetch_batches,
+        collate_fn=numpy_collate,
+        pin_memory=bool(data_cfg.get("pin_memory", False)),
+        timeout=timeout,
+    )
+    val_loader = (
+        DataLoaderIterator(
+            val_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=num_workers,
+            prefetch_batches=prefetch_batches,
+            collate_fn=numpy_collate,
+            pin_memory=bool(data_cfg.get("pin_memory", False)),
+            timeout=timeout,
+        )
+        if val_ds is not None
+        else None
+    )
 
     return train_loader, val_loader, None
