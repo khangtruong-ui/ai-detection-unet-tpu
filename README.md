@@ -13,6 +13,7 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
 
 1. **JAX/Flax Native Architecture & GPU/TPU Utilization**:
    - High-throughput execution with XLA compilation (`jax.jit`).
+   - Seamless compatibility with modern JAX (>=0.11) and Flax (>=0.12) with built-in tracer and replication compatibility shims.
    - Proper Linen state management: updates `mutable=['batch_stats']` for batch normalization and threads `rngs={'dropout': ...}` PRNG keys, preventing fallback loops and maximizing hardware utilization.
    - Asynchronous threaded prefetching in `DataLoaderIterator` to keep GPUs/TPUs fully utilized during streaming dataset training.
    - Multi-device single-host scaling across 8 TPU v5e cores or multi-GPU environments using `jax.pmap` and `axis_name='devices'`.
@@ -152,7 +153,7 @@ ai-detection-unet-tpu/
 │       ├── diffusion_diff_minimized/
 │       └── unet_scratch/
 ├── sid_unet/
-│   ├── __init__.py
+│   ├── __init__.py             # Package init & JAX/Flax compatibility shims
 │   ├── train.py                # sid-train CLI entrypoint
 │   ├── kill.py                 # sid-kill CLI entrypoint
 │   ├── evaluate.py             # sid-eval CLI entrypoint
