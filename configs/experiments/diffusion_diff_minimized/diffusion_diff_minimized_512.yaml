@@ -6,6 +6,9 @@ project:
 data:
   dataset_name: KhangTruong/COCO-inpainted
   streaming: true
+  cache_files: true
+  max_cached_files: 4
+  max_cache_gb: 6.0
   image_size:
   - 512
   - 512

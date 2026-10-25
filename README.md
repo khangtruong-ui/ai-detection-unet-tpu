@@ -62,7 +62,8 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
    - Integrated with [`parquet-dataset-loader`](https://github.com/khangtruong-ui/parquet-dataset-loader) for non-blocking index streaming (`use_parquet_loader: true`).
    - Seeks directly to row groups using HTTP range requests without downloading entire multi-gigabyte datasets (such as 62 GB of `COCO-inpainted`).
    - Features `ParquetForensicsDataset` sequence adapter for on-the-fly sample preprocessing, decoding compressed PNG/JPEG bytes, and joint spatial transformations.
-   - Automatically maintains row-group cache locality via `BlockShuffledSampler`, eliminating multi-worker cache thrashing, remote connection resets, and DataLoader timeout errors.
+   - Automatically maintains row-group and file cache locality via `BlockShuffledSampler`, eliminating multi-worker cache thrashing, remote connection resets, and DataLoader timeout errors.
+   - Bounded on-disk forward file caching (`cache_files: true`, `max_cached_files: 4`, `max_cache_gb: 6.0`) with background prefetching, eliminating Hugging Face HTTP 429 rate limit errors during multi-worker streaming iterations.
    - Powered by `parquet_dataset_loader.DataLoader` with `numpy_collate` for pure NumPy batch collation, preventing PyTorch tensor conversion issues in JAX/Flax pipelines.
    - Built-in data speed benchmarking via `loader.benchmark(num_batches=50)` and bottleneck diagnostics via `loader.view_bottleneck()`.
 
