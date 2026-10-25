@@ -263,3 +263,32 @@ def test_parquet_dataloader_api_features():
     diagnosis = loader.view_bottleneck()
     assert "primary_bottleneck" in diagnosis
     loader.disable_debug()
+
+
+@pytest.mark.timeout(60)
+def test_parquet_forensics_dataset_row_groups_and_dataloader_block_shuffle():
+    """Verify ParquetForensicsDataset exposes row group indices and DataLoader uses BlockShuffledSampler."""
+    from parquet_dataset_loader.dataset import BlockShuffledSampler
+
+    class MockInnerDataset:
+        def __len__(self):
+            return 20
+        def __getitem__(self, idx):
+            return {"image": Image.new("RGB", (16, 16)), "mask": Image.new("L", (16, 16))}
+        def get_row_group_indices(self):
+            return [list(range(0, 10)), list(range(10, 20))]
+
+    inner = MockInnerDataset()
+    pds = ParquetForensicsDataset(inner, max_samples=15)
+    assert pds.pdl_dataset is inner
+    groups = pds.get_row_group_indices()
+    assert len(groups) == 2
+    assert groups[0] == list(range(0, 10))
+    assert groups[1] == list(range(10, 15))
+
+    loader = DataLoaderIterator(pds, batch_size=5, shuffle=True, seed=42, num_workers=2)
+    assert isinstance(loader.sampler, BlockShuffledSampler)
+    batches = list(loader)
+    assert len(batches) == 3
+    assert batches[0]["image"].shape == (5, 512, 512, 3)
+

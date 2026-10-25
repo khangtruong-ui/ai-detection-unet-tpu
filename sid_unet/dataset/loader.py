@@ -315,6 +315,23 @@ class ParquetForensicsDataset(collections.abc.Sequence):
         else:
             raise TypeError(f"Invalid index type for {type(self).__name__}: {type(idx)}")
 
+    @property
+    def pdl_dataset(self) -> Any:
+        return self.parquet_dataset
+
+    def get_row_group_indices(self) -> List[List[int]]:
+        """Return row group indices from underlying Parquet dataset filtered by max_samples."""
+        if hasattr(self.parquet_dataset, "get_row_group_indices"):
+            groups = self.parquet_dataset.get_row_group_indices()
+            total = len(self)
+            filtered = []
+            for g in groups:
+                valid_g = [i for i in g if i < total]
+                if valid_g:
+                    filtered.append(valid_g)
+            return filtered
+        return [list(range(len(self)))]
+
 
 class DataLoaderIterator(DataLoader):
     """Batch generator over dataset with multi-worker prefetching and robust collation.
@@ -331,7 +348,7 @@ class DataLoaderIterator(DataLoader):
         num_workers: Optional[int] = None,
         prefetch_batches: int = 4,
         collate_fn: Optional[Callable[[Any], Any]] = None,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
         worker_type: str = "auto",
         pin_memory: bool = False,
         debug: bool = False,
@@ -354,6 +371,7 @@ class DataLoaderIterator(DataLoader):
             pin_memory=pin_memory,
             debug=debug,
             seed=seed,
+            **kwargs,
         )
 
     def _collate(self, items: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
@@ -510,6 +528,8 @@ def create_dataloaders(
         train_ds = MockDataset(num_samples=t_samples, image_size=img_size, is_cached=is_cached, latent_channels=latent_channels, transform=train_transform)
         val_ds = MockDataset(num_samples=v_samples, image_size=img_size, is_cached=is_cached, latent_channels=latent_channels, transform=None)
 
+    timeout = float(data_cfg.get("timeout", 180.0))
+
     train_loader = DataLoaderIterator(
         train_ds,
         batch_size=batch_size,
@@ -519,6 +539,7 @@ def create_dataloaders(
         prefetch_batches=prefetch_batches,
         collate_fn=numpy_collate,
         pin_memory=bool(data_cfg.get("pin_memory", False)),
+        timeout=timeout,
     )
     val_loader = (
         DataLoaderIterator(
@@ -530,6 +551,7 @@ def create_dataloaders(
             prefetch_batches=prefetch_batches,
             collate_fn=numpy_collate,
             pin_memory=bool(data_cfg.get("pin_memory", False)),
+            timeout=timeout,
         )
         if val_ds is not None
         else None
