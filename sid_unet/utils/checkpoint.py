@@ -9,6 +9,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
@@ -34,6 +35,138 @@ LOCAL_CHECKPOINT_PRIORITY = [
     "checkpoint_latest.safetensors",
     "checkpoint_best.safetensors",
 ]
+
+HF_CHECKPOINT_CANDIDATES = [
+    "checkpoints/checkpoint_latest.pt",
+    "checkpoint_latest.pt",
+    "checkpoints/checkpoint_best.pt",
+    "checkpoint_best.pt",
+    "checkpoints/checkpoint_periodic.pt",
+    "checkpoint_periodic.pt",
+    "model.pt",
+    "pytorch_model.bin",
+]
+
+
+def is_hf_repo_id(identifier: str) -> bool:
+    """Determine if a given string represents a Hugging Face repository identifier."""
+    if not identifier or not isinstance(identifier, str):
+        return False
+
+    raw = identifier.strip()
+    if raw.startswith("hf://") or raw.startswith("https://huggingface.co/"):
+        return True
+
+    # If the path exists as a local file or directory, prioritize local path
+    if os.path.exists(raw):
+        return False
+
+    if raw.startswith("/") or raw.startswith("./") or raw.startswith("../") or "\\" in raw:
+        return False
+
+    for prefix in ["checkpoints/", "outputs/", "weights/", "runs/"]:
+        if raw.lower().startswith(prefix):
+            return False
+
+    repo_part = raw.split(":", 1)[0]
+    parts = repo_part.split("/")
+    if len(parts) >= 2:
+        owner, repo = parts[0], parts[1]
+        if re.match(r"^[a-zA-Z0-9_\-\.]+$", owner) and re.match(r"^[a-zA-Z0-9_\-\.]+$", repo):
+            if len(parts) == 2:
+                ext = os.path.splitext(repo)[1].lower()
+                if ext in [".pt", ".pth", ".bin", ".safetensors", ".ckpt", ".yaml", ".yml", ".json"]:
+                    return False
+            return True
+
+    return False
+
+
+def parse_hf_repo_uri(uri: str) -> Tuple[str, Optional[str]]:
+    """Parse a Hugging Face URI/identifier into (repo_id, optional_filename)."""
+    cleaned = uri.strip()
+    if cleaned.startswith("hf://"):
+        cleaned = cleaned[5:]
+    elif cleaned.startswith("https://huggingface.co/"):
+        cleaned = cleaned[23:]
+
+    filename = None
+    if ":" in cleaned:
+        repo_id, filename = cleaned.split(":", 1)
+    else:
+        parts = cleaned.split("/")
+        if len(parts) > 2:
+            repo_id = f"{parts[0]}/{parts[1]}"
+            filename = "/".join(parts[2:])
+        else:
+            repo_id = cleaned
+
+    return repo_id.strip("/"), filename.strip("/") if filename else None
+
+
+def upload_hf_checkpoint(
+    file_path: Union[str, Path],
+    repo_id: str,
+    path_in_repo: Optional[str] = None,
+    commit_message: Optional[str] = None,
+) -> Optional[str]:
+    """Upload a checkpoint file to a Hugging Face Hub model repository."""
+    file_path = Path(file_path)
+    if not file_path.is_file():
+        logger.warning(f"Cannot upload non-existent checkpoint: {file_path}")
+        return None
+
+    target_name = path_in_repo or f"checkpoints/{file_path.name}"
+    msg = commit_message or f"Upload checkpoint {file_path.name}"
+
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        url = api.upload_file(
+            path_or_fileobj=str(file_path),
+            path_in_repo=target_name,
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=msg,
+        )
+        logger.info(f"🚀 Checkpoint successfully uploaded to Hugging Face: {repo_id}/{target_name}")
+        return str(url)
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to upload checkpoint to Hugging Face repo '{repo_id}': {e}")
+        return None
+
+
+def download_hf_checkpoint(
+    repo_id_or_uri: str,
+    filename: Optional[str] = None,
+    cache_dir: Optional[str] = None,
+) -> str:
+    """Download checkpoint from Hugging Face Hub, trying common checkpoint filenames."""
+    from huggingface_hub import hf_hub_download
+
+    repo_id, explicit_file = parse_hf_repo_uri(repo_id_or_uri)
+    target_file = filename or explicit_file
+
+    candidates = [target_file] if target_file else HF_CHECKPOINT_CANDIDATES
+    last_err = None
+
+    for cand in candidates:
+        try:
+            logger.info(f"Checking Hugging Face repo '{repo_id}' for file '{cand}'...")
+            downloaded = hf_hub_download(
+                repo_id=repo_id,
+                filename=cand,
+                cache_dir=cache_dir,
+            )
+            logger.info(f"✅ Checkpoint downloaded from Hugging Face: {downloaded}")
+            return downloaded
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise FileNotFoundError(
+        f"Could not find any valid checkpoint in Hugging Face repo '{repo_id}'. Last error: {last_err}"
+    )
 
 
 def find_auto_resume_checkpoint(checkpoint_dir: Union[str, Path]) -> Optional[str]:
@@ -70,6 +203,8 @@ def save_checkpoint(
     model_type: str = "diffusion_diff",
     batch_stats: Optional[Dict[str, Any]] = None,
     save_torch_format: bool = True,
+    hf_repo_id: Optional[str] = None,
+    push_to_hub: bool = False,
 ) -> str:
     """Save model checkpoint.
 
@@ -100,6 +235,8 @@ def save_checkpoint(
                 "model_type": model_type,
             }
             jmz_save_checkpoint(params, path, format="safetensors", metadata=meta)
+            if push_to_hub and hf_repo_id:
+                upload_hf_checkpoint(path, repo_id=hf_repo_id)
             return str(path)
 
     # Standard .pt / .pth checkpoint containing model_state_dict
@@ -131,6 +268,10 @@ def save_checkpoint(
 
     torch.save(ckpt_dict, str(path))
     logger.info(f"💾 Checkpoint successfully saved to {path} (Epoch {epoch}, Step {step})")
+
+    if push_to_hub and hf_repo_id:
+        upload_hf_checkpoint(path, repo_id=hf_repo_id)
+
     return str(path)
 
 
@@ -145,10 +286,15 @@ def load_checkpoint(
     1. PyTorch checkpoints (.pt / .pth) from ai-detection-unet-gpu containing 'model_state_dict'.
     2. JAX safetensors / msgpack checkpoints.
     3. Combined hybrid checkpoints.
+    4. Hugging Face Hub model repositories (e.g. 'KhangTruong/diffusion-diff-minimized-512').
     """
     path_str = str(checkpoint_path)
     if not os.path.exists(path_str):
-        raise FileNotFoundError(f"Checkpoint file not found: {path_str}")
+        if is_hf_repo_id(path_str):
+            logger.info(f"Resolving checkpoint from Hugging Face repository: {path_str}")
+            path_str = download_hf_checkpoint(path_str)
+        else:
+            raise FileNotFoundError(f"Checkpoint file not found: {path_str}")
 
     logger.info(f"Loading checkpoint from: {path_str}")
 
@@ -198,7 +344,16 @@ def load_checkpoint(
 
     if torch_state is not None:
         if _HAS_JMZ:
-            converted = convert_torch_diffusion_diff_to_jax(torch_state, config=config)
+            normalized_state = {}
+            for k, v in torch_state.items():
+                norm_k = k
+                if "classifier_head.fc.1." in norm_k:
+                    norm_k = norm_k.replace("classifier_head.fc.1.", "classifier_head.fc1.")
+                elif "classifier_head.fc.4." in norm_k:
+                    norm_k = norm_k.replace("classifier_head.fc.4.", "classifier_head.fc2.")
+                normalized_state[norm_k] = v
+
+            converted = convert_torch_diffusion_diff_to_jax(normalized_state, config=config)
             params = converted.get("params", converted)
             batch_stats = converted.get("batch_stats", {})
             return {

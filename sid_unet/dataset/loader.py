@@ -393,14 +393,27 @@ def create_dataloaders(
     """Create train, validation, and test dataloaders from configuration using parquet-dataset-loader."""
     data_cfg = getattr(config, "data", {}) if hasattr(config, "data") else config.get("data", {})
     img_size = tuple(data_cfg.get("image_size", [512, 512]))
-    batch_size = int(data_cfg.get("batch_size", 8))
+
+    # Batch size in the config is specified per-device; global batch size is computed
+    from sid_unet.utils.distributed import get_device_count
+    num_devices = get_device_count()
+    raw_per_device_batch_size = data_cfg.get("per_device_batch_size", data_cfg.get("batch_size", 8))
+    per_device_batch_size = max(1, int(raw_per_device_batch_size))
+    if "global_batch_size" in data_cfg and data_cfg["global_batch_size"] is not None:
+        batch_size = max(1, int(data_cfg["global_batch_size"]))
+    else:
+        batch_size = per_device_batch_size * num_devices
+
     dataset_name = str(data_cfg.get("dataset_name", "KhangTruong/COCO-inpainted"))
     prefetch_batches = int(data_cfg.get("prefetch_batches", 8))
 
     # Worker number defaults to os.cpu_count()
     raw_workers = data_cfg.get("num_workers", -1)
     num_workers = resolve_num_workers(raw_workers)
-    logger.info(f"⚡ Data loading configured with {num_workers} workers (System CPU cores: {os.cpu_count()})")
+    logger.info(
+        f"⚡ Data loading configured with {num_workers} workers (System CPU cores: {os.cpu_count()}). "
+        f"Config batch size is per device: {per_device_batch_size} × {num_devices} device(s) -> Computed global batch size: {batch_size}"
+    )
 
     # Check if cached mode
     is_cached = bool(data_cfg.get("cached", False) or data_cfg.get("use_cache", False))
@@ -573,5 +586,11 @@ def create_dataloaders(
         if val_ds is not None
         else None
     )
+
+    train_loader.per_device_batch_size = per_device_batch_size
+    train_loader.global_batch_size = batch_size
+    if val_loader is not None:
+        val_loader.per_device_batch_size = per_device_batch_size
+        val_loader.global_batch_size = batch_size
 
     return train_loader, val_loader, None

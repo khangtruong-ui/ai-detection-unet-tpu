@@ -11,12 +11,13 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
 
 ## 🌟 Key Features
 
-1. **JAX/Flax Native Architecture & GPU/TPU Utilization**:
+1. **JAX/Flax Native Architecture & Full Multi-GPU / TPU Utilization**:
    - High-throughput execution with XLA compilation (`jax.jit`).
    - Seamless compatibility with modern JAX (>=0.11) and Flax (>=0.12) with built-in tracer and replication compatibility shims.
-   - Proper Linen state management: updates `mutable=['batch_stats']` for batch normalization and threads `rngs={'dropout': ...}` PRNG keys, preventing fallback loops and maximizing hardware utilization.
+   - **Per-Device Batch Size Configuration**: `data.batch_size` in configuration files or CLI overrides is interpreted as **per device**. The global batch size is automatically computed across all detected devices (`global_batch_size = per_device_batch_size * num_devices`), guaranteeing even distribution across dual GPUs or 8 TPU cores.
+   - **Multi-Device Data Parallelism via `jax.pmap`**: Automatically utilizes all available GPUs (e.g. dual Tesla T4 GPUs) or TPU cores. Divides microbatches across devices (`shard_batch`), replicates parameters (`replicate_params`), synchronizes gradients and batch normalization running statistics using all-reduce `jax.lax.pmean(axis_name="devices")`, ensuring 100% hardware utilization across all devices.
+   - Proper Linen state management: updates `mutable=['batch_stats']` for batch normalization and threads `rngs={'dropout': ...}` PRNG keys across devices.
    - Asynchronous threaded prefetching in `DataLoaderIterator` to keep GPUs/TPUs fully utilized during streaming dataset training.
-   - Multi-device single-host scaling across 8 TPU v5e cores or multi-GPU environments using `jax.pmap` and `axis_name='devices'`.
    - Native support for `bfloat16` (TPU-native precision) and `float32`.
 
 2. **Diffusion-Diff Series Forensics Backbones**:
@@ -28,15 +29,17 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
      - *Line 2*: Single chosen noisy latent from the diffusion model ($t=250$, 80 channels)
      - Total representation $Z = 84$ channels with parallel VAE perpendicular skips.
 
-3. **Flexible Epoch Sizing & Robust Batch Handling**:
-   - Dynamic sample resolution via `resolve_sample_limit`: easily configure `steps_per_epoch` or `train_samples_per_epoch` directly from CLI overrides or YAML configs.
-   - Open-ended streaming datasets (setting limit to `-1` or `None`) stream continuously without being artificially clamped to 1000 steps.
-   - Robust batch dimension handling: loss formulations (segmentation mask losses and auxiliary classification cross-entropy) natively handle arbitrary batch dimensions including single-sample executions (`batch_size=1`) for memory-constrained environments.
+3. **Periodic Checkpointing & Hugging Face Hub Sync**:
+   - **Periodic Checkpointing (`checkpoint_period`)**: Supports real-time periodic checkpointing during long training runs (e.g. `checkpoint_period: "2m"`, `"1h"`, or `3600`). Saves `checkpoint_periodic.pt` and updates `checkpoint_latest.pt` without waiting for epoch completion. The checkpoint timer starts **strictly after the second batch has been consumed**, ensuring that initial XLA / JIT graph compilation delays do not prematurely trigger early checkpoint saves and that the checkpoint timer accurately accounts for real training speed (including when resuming).
+   - **Hugging Face Hub Integration (`--hf-repo`, `hf_repo_id`, `push_to_hub`)**: Automatically uploads checkpoints (`checkpoint_latest.pt`, `checkpoint_best.pt`, `checkpoint_periodic.pt`) to Hugging Face model repositories (e.g. `KhangTruong/diffusion-diff-minimized-512-fpn`). Directly pass `--hf-repo <repo_id>` on the CLI or specify in config.
+   - **Hugging Face Auto-Resume**: Directly pass Hugging Face model identifiers or URIs (e.g. `--resume KhangTruong/diffusion-diff-minimized-512` or `hf://...`) to download and resume checkpoints automatically.
 
-4. **100% Checkpoint Interoperability with `ai-detection-unet-gpu`**:
+4. **100% Checkpoint Interoperability with `khangtruong-ui/ai-detection-unet-gpu`**:
    - Model weights default to saving and loading in the exact PyTorch `state_dict` format expected by `ai-detection-unet-gpu`.
    - Seamlessly loads `.pt` and `.safetensors` checkpoints created by PyTorch trainers, converting them into Flax parameter PyTrees on the fly.
+   - Normalized layer mappings for auxiliary classifiers (`classifier_head.fc.1` / `fc.4` and `fc1` / `fc2`).
    - Saved checkpoints contain `model_state_dict` with canonical PyTorch tensor keys (`z_norm.weight`, `decoder.init_conv.0.weight`, etc.) for instant cross-framework deployment.
+   - Rigorously tested by loading checkpoints generated from the `khangtruong-ui/ai-detection-unet-gpu` repository.
 
 5. **Detached Terminal Execution Logging to `.logs.txt` with Clean TQDM Progress**:
    - All primary CLI commands (`sid-train`, `sid-cache`, `sid-kill`) default to **detaching from the controlling terminal session** into background mode (`setsid`).
@@ -97,11 +100,11 @@ By default, `sid-train` detaches into the background and streams logs to `.logs.
 # Default background detached mode
 sid-train --config configs/experiments/diffusion_diff_minimized/default.yaml
 
-# Interactive foreground mode
-sid-train --config configs/experiments/diffusion_diff_minimized/default.yaml --foreground
+# Interactive foreground mode with Hugging Face Hub checkpoint upload
+sid-train --config configs/experiments/diffusion_diff_minimized/default_512.yaml --hf-repo KhangTruong/diffusion-diff-minimized-512-fpn --foreground
 
-# Override training hyperparameters on the command line
-sid-train --config configs/default.yaml --override training.batch_size=16 training.learning_rate=0.0002
+# Override training hyperparameters on the command line (e.g. multi-device batch size and periodic checkpoint interval)
+sid-train --config configs/experiments/diffusion_diff_minimized/default_512.yaml --override data.batch_size=4 training.checkpoint_period=30m
 ```
 
 ### 2. `sid-cache` (Latent Feature Caching)

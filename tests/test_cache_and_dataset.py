@@ -176,6 +176,21 @@ def test_create_dataloaders_steps_per_epoch_override():
     assert safe_dataloader_len(train_loader) == 5
 
 
+@pytest.mark.timeout(30)
+def test_create_dataloaders_per_device_batch_size():
+    """Verify create_dataloaders treats data.batch_size as per-device and computes global batch size."""
+    from sid_unet.utils.distributed import get_device_count
+    n_dev = get_device_count()
+    cfg = load_config(
+        "configs/test_quick.yaml",
+        overrides=["data.dataset_name=mock", "data.batch_size=3"],
+    )
+    train_loader, val_loader, _ = create_dataloaders(cfg)
+    assert train_loader.per_device_batch_size == 3
+    assert train_loader.batch_size == 3 * n_dev
+    assert train_loader.global_batch_size == 3 * n_dev
+
+
 @pytest.mark.timeout(60)
 def test_process_raw_sample_bytes_and_dict():
     """Verify process_raw_sample handles raw byte buffers and dict payloads from Parquet."""
@@ -327,5 +342,5 @@ def test_parquet_forensics_dataset_file_indices_and_forward_cache_config():
     assert cfg.data.max_cached_files == 4
     assert cfg.data.max_cache_gb == 6.0
     train_loader, val_loader, _ = create_dataloaders(cfg)
-    assert len(train_loader) == 2
+    assert len(train_loader) == 16 // train_loader.batch_size
 
