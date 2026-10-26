@@ -12,7 +12,7 @@ data:
   image_size:
   - 512
   - 512
-  batch_size: 2 # Per-device batch size (global size is computed across available devices)
+  batch_size: 8 # Per-device batch size (global size is computed across available devices)
   num_workers: -1
   pin_memory: true
   prefetch_batches: 48
