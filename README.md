@@ -29,8 +29,8 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
      - Total representation $Z = 84$ channels with parallel VAE perpendicular skips.
 
 3. **Periodic Checkpointing & Hugging Face Hub Sync**:
-   - **Periodic Checkpointing (`checkpoint_period`)**: Supports real-time periodic checkpointing during long training runs (e.g. `checkpoint_period: "2m"`, `"1h"`, or `3600`). Saves `checkpoint_periodic.pt` and updates `checkpoint_latest.pt` without waiting for epoch completion.
-   - **Hugging Face Hub Integration (`hf_repo_id`, `push_to_hub`)**: Automatically uploads checkpoints (`checkpoint_latest.pt`, `checkpoint_best.pt`, `checkpoint_periodic.pt`) to Hugging Face model repositories (e.g. `KhangTruong/diffusion-diff-minimized-512`).
+   - **Periodic Checkpointing (`checkpoint_period`)**: Supports real-time periodic checkpointing during long training runs (e.g. `checkpoint_period: "2m"`, `"1h"`, or `3600`). Saves `checkpoint_periodic.pt` and updates `checkpoint_latest.pt` without waiting for epoch completion. The checkpoint timer starts **strictly after the first batch is completed**, ensuring that initial XLA / JIT graph compilation delays do not prematurely trigger early checkpoint saves at step 1.
+   - **Hugging Face Hub Integration (`--hf-repo`, `hf_repo_id`, `push_to_hub`)**: Automatically uploads checkpoints (`checkpoint_latest.pt`, `checkpoint_best.pt`, `checkpoint_periodic.pt`) to Hugging Face model repositories (e.g. `KhangTruong/diffusion-diff-minimized-512-fpn`). Directly pass `--hf-repo <repo_id>` on the CLI or specify in config.
    - **Hugging Face Auto-Resume**: Directly pass Hugging Face model identifiers or URIs (e.g. `--resume KhangTruong/diffusion-diff-minimized-512` or `hf://...`) to download and resume checkpoints automatically.
 
 4. **100% Checkpoint Interoperability with `khangtruong-ui/ai-detection-unet-gpu`**:
@@ -99,11 +99,11 @@ By default, `sid-train` detaches into the background and streams logs to `.logs.
 # Default background detached mode
 sid-train --config configs/experiments/diffusion_diff_minimized/default.yaml
 
-# Interactive foreground mode
-sid-train --config configs/experiments/diffusion_diff_minimized/default.yaml --foreground
+# Interactive foreground mode with Hugging Face Hub checkpoint upload
+sid-train --config configs/experiments/diffusion_diff_minimized/default_512.yaml --hf-repo KhangTruong/diffusion-diff-minimized-512-fpn --foreground
 
-# Override training hyperparameters on the command line
-sid-train --config configs/default.yaml --override training.batch_size=16 training.learning_rate=0.0002
+# Override training hyperparameters on the command line (e.g. multi-device batch size and periodic checkpoint interval)
+sid-train --config configs/experiments/diffusion_diff_minimized/default_512.yaml --override data.batch_size=4 training.checkpoint_period=30m
 ```
 
 ### 2. `sid-cache` (Latent Feature Caching)

@@ -145,9 +145,10 @@ class Trainer:
         # Parse periodic checkpoint interval (e.g. 3600, "2m", "1h", "300s")
         raw_period = tr_cfg.get("checkpoint_period")
         self.checkpoint_period = self._parse_period(raw_period)
-        self.last_periodic_ckpt_time = time.time()
+        # Periodic checkpoint timer begins after the first batch is completed
+        self.last_periodic_ckpt_time: Optional[float] = None
         if self.checkpoint_period > 0:
-            logger.info(f"⏱️ Periodic checkpointing enabled every {self.checkpoint_period:.1f} seconds.")
+            logger.info(f"⏱️ Periodic checkpointing enabled every {self.checkpoint_period:.1f} seconds (starts after first batch).")
 
         # Hugging Face integration
         hf_repo_id = tr_cfg.get("hf_repo_id") or proj_cfg.get("hf_repo_id") or tr_cfg.get("hub_repo_id")
@@ -411,6 +412,12 @@ class Trainer:
                 f"(global batch_size={batch_size}, per_device={batch_size // self.num_devices})."
             )
         else:
+            if self.is_multi_device:
+                logger.warning(
+                    f"⚠️ Multi-device pmap data parallelism disabled (num_devices={self.num_devices}, batch_size={batch_size}). "
+                    f"To utilize all {self.num_devices} devices, ensure global batch_size >= {self.num_devices} "
+                    f"and batch_size % {self.num_devices} == 0."
+                )
             current_state = self.state
 
         pbar = tqdm(
@@ -424,24 +431,6 @@ class Trainer:
 
         try:
             for step, batch_np in enumerate(pbar):
-                # Check periodic checkpoint interval
-                if self.checkpoint_period > 0 and (time.time() - self.last_periodic_ckpt_time) >= self.checkpoint_period:
-                    save_state = unreplicate_params(current_state) if use_pmap else current_state
-                    curr_computed = seg_metrics.compute()
-                    self.ckpt_manager.save_periodic(
-                        epoch=epoch,
-                        step=self.global_step,
-                        params=save_state.params,
-                        metrics={
-                            "train_loss": float(np.mean(epoch_losses)) if epoch_losses else 0.0,
-                            "train_iou": curr_computed["iou"],
-                        },
-                        config=self.config,
-                        batch_stats=save_state.batch_stats,
-                        model_type=self.model_type,
-                    )
-                    self.last_periodic_ckpt_time = time.time()
-
                 self.global_step += 1
                 batch_jax = {k: jnp.asarray(v) for k, v in batch_np.items()}
 
@@ -478,6 +467,26 @@ class Trainer:
                     current_iou = current_metrics["iou"]
 
                     pbar.set_postfix({"loss": f"{step_loss:.4f}", "iou": f"{current_iou:.4f}"})
+
+                    # Periodic checkpointing: start timer after first batch finishes, then save periodically
+                    if self.last_periodic_ckpt_time is None:
+                        self.last_periodic_ckpt_time = time.time()
+                    elif self.checkpoint_period > 0 and (time.time() - self.last_periodic_ckpt_time) >= self.checkpoint_period:
+                        save_state = unreplicate_params(current_state) if use_pmap else current_state
+                        curr_computed = seg_metrics.compute()
+                        self.ckpt_manager.save_periodic(
+                            epoch=epoch,
+                            step=self.global_step,
+                            params=save_state.params,
+                            metrics={
+                                "train_loss": float(np.mean(epoch_losses)) if epoch_losses else 0.0,
+                                "train_iou": curr_computed["iou"],
+                            },
+                            config=self.config,
+                            batch_stats=save_state.batch_stats,
+                            model_type=self.model_type,
+                        )
+                        self.last_periodic_ckpt_time = time.time()
                 except Exception as e:
                     logger.error(f"❌ Training step failed at epoch {epoch}, step {self.global_step}: {e}", exc_info=True)
                     raise e

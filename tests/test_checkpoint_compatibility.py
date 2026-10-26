@@ -273,3 +273,34 @@ def test_hf_checkpoint_upload_and_download_mocked(tmp_path):
         assert downloaded == str(ckpt_file)
         mock_download.assert_called_once()
 
+
+@pytest.mark.timeout(30)
+def test_periodic_checkpoint_timer_starts_after_first_batch(tmp_path):
+    """Verify Trainer initializes last_periodic_ckpt_time to None and starts timer only after batch 1."""
+    from sid_unet.utils.config import load_config
+    out_dir = tmp_path / "periodic_test"
+    cfg = load_config(
+        "configs/test_smoke.yaml",
+        overrides=[
+            f"project.output_dir={out_dir}",
+            "training.checkpoint_period=10s",
+            "data.dataset_name=mock",
+        ],
+    )
+    trainer = Trainer(cfg)
+    # Timer MUST NOT start at __init__ before first batch finishes
+    assert trainer.checkpoint_period == 10.0
+    assert trainer.last_periodic_ckpt_time is None
+
+
+@pytest.mark.timeout(30)
+def test_cli_hf_repo_flag_parsing():
+    """Verify sid-train parse_args handles --hf-repo and --hub-repo flags."""
+    from sid_unet.train import parse_args
+    args = parse_args(["--config", "configs/test_smoke.yaml", "--hf-repo", "KhangTruong/diffusion-diff-minimized-512-fpn"])
+    assert args.hf_repo == "KhangTruong/diffusion-diff-minimized-512-fpn"
+
+    args2 = parse_args(["--config", "configs/test_smoke.yaml", "--hub-repo", "KhangTruong/test-model"])
+    assert args2.hf_repo == "KhangTruong/test-model"
+
+
