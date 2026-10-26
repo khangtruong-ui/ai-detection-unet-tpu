@@ -138,16 +138,37 @@ class Trainer:
             optax.adamw(learning_rate=schedule, weight_decay=self.weight_decay),
         )
 
-        # 5. Callbacks
+        # 5. Callbacks & Checkpoint Management
         early_patience = int(tr_cfg.get("early_stopping_patience", 5))
         self.early_stopping = EarlyStopping(patience=early_patience, mode="max")
+
+        # Parse periodic checkpoint interval (e.g. 3600, "2m", "1h", "300s")
+        raw_period = tr_cfg.get("checkpoint_period")
+        self.checkpoint_period = self._parse_period(raw_period)
+        self.last_periodic_ckpt_time = time.time()
+        if self.checkpoint_period > 0:
+            logger.info(f"⏱️ Periodic checkpointing enabled every {self.checkpoint_period:.1f} seconds.")
+
+        # Hugging Face integration
+        hf_repo_id = tr_cfg.get("hf_repo_id") or proj_cfg.get("hf_repo_id") or tr_cfg.get("hub_repo_id")
+        push_to_hub = bool(tr_cfg.get("push_to_hub", bool(hf_repo_id)))
+        self.hf_repo_id = hf_repo_id
+        self.push_to_hub = push_to_hub
+        if self.push_to_hub:
+            logger.info(f"🌐 Hugging Face Hub checkpoint sync active for repository: '{self.hf_repo_id}'")
+
         self.ckpt_manager = CheckpointManager(
             checkpoint_dir=self.checkpoint_dir,
             metric_name=tr_cfg.get("early_stopping_metric", "val_iou"),
             mode=tr_cfg.get("early_stopping_mode", "max"),
             save_best=bool(tr_cfg.get("save_best", True)),
             save_latest=bool(tr_cfg.get("save_latest", True)),
+            hf_repo_id=self.hf_repo_id,
+            push_to_hub=self.push_to_hub,
         )
+
+        self.num_devices = self.device_info.get("device_count", 1)
+        self.is_multi_device = self.num_devices > 1
 
         self.global_step = 0
         self.start_epoch = 1
@@ -164,6 +185,28 @@ class Trainer:
                 self.resume_from_checkpoint(auto_ckpt)
         elif resume_arg and resume_arg != "none":
             self.resume_from_checkpoint(resume_arg)
+
+    @staticmethod
+    def _parse_period(val: Any) -> float:
+        """Parse checkpoint period specifications into numeric seconds."""
+        if val is None or val == "" or val is False:
+            return 0.0
+        if isinstance(val, (int, float)):
+            return max(0.0, float(val))
+        val_str = str(val).strip().lower()
+        if val_str.endswith("s"):
+            val_str = val_str[:-1].strip()
+            return max(0.0, float(val_str)) if val_str else 0.0
+        elif val_str.endswith("m"):
+            val_str = val_str[:-1].strip()
+            return max(0.0, float(val_str) * 60.0) if val_str else 0.0
+        elif val_str.endswith("h"):
+            val_str = val_str[:-1].strip()
+            return max(0.0, float(val_str) * 3600.0) if val_str else 0.0
+        try:
+            return max(0.0, float(val_str))
+        except ValueError:
+            return 0.0
 
     def _init_train_state(self):
         """Initialize TrainState with model parameters."""
@@ -319,6 +362,8 @@ class Trainer:
             loss_metrics["total_loss"] = total_loss
             return total_loss, (loss_metrics, new_batch_stats)
 
+        import functools
+
         # Single-device JIT training step
         @jax.jit
         def single_train_step(state, batch, step_rng):
@@ -334,10 +379,40 @@ class Trainer:
                 new_state = new_state.replace(batch_stats=new_batch_stats)
             return new_state, metrics
 
+        # Multi-device PMAP training step (spans all local GPUs / TPU cores)
+        @functools.partial(jax.pmap, axis_name="devices")
+        def multi_train_step(state, batch, step_rng):
+            grad_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
+            (loss, (metrics, new_batch_stats)), grads = grad_fn(state.params, batch, state.batch_stats, step_rng)
+            grads = jax.lax.pmean(grads, axis_name="devices")
+            metrics = jax.lax.pmean(metrics, axis_name="devices")
+            new_state = state.apply_gradients(grads=grads)
+            if new_batch_stats is not None:
+                new_batch_stats = jax.lax.pmean(new_batch_stats, axis_name="devices")
+                if compute_dtype != jnp.float32:
+                    new_batch_stats = jax.tree_util.tree_map(
+                        lambda b: b.astype(jnp.float32) if jnp.issubdtype(b.dtype, jnp.floating) else b,
+                        new_batch_stats,
+                    )
+                new_state = new_state.replace(batch_stats=new_batch_stats)
+            return new_state, metrics
+
         epoch_losses: List[float] = []
         seg_metrics = RunningSegmentationMetrics(threshold=0.5)
 
         total_batches = safe_dataloader_len(train_loader)
+        batch_size = getattr(train_loader, "batch_size", 1)
+        use_pmap = self.is_multi_device and (batch_size >= self.num_devices) and (batch_size % self.num_devices == 0)
+
+        if use_pmap:
+            current_state = replicate_params(self.state)
+            logger.info(
+                f"⚡ Utilizing {self.num_devices} devices with jax.pmap data parallelism "
+                f"(global batch_size={batch_size}, per_device={batch_size // self.num_devices})."
+            )
+        else:
+            current_state = self.state
+
         pbar = tqdm(
             train_loader,
             desc=f"Epoch {epoch:02d}/{self.epochs:02d} [Train]",
@@ -347,32 +422,70 @@ class Trainer:
             dynamic_ncols=True,
         )
 
-        for step, batch_np in enumerate(pbar):
-            self.global_step += 1
-            self.rng, step_rng = jax.random.split(self.rng)
-
-            # Move batch to JAX arrays
-            batch_jax = {k: jnp.asarray(v) for k, v in batch_np.items()}
-
-            try:
-                self.state, metrics = single_train_step(self.state, batch_jax, step_rng)
-                step_loss = float(metrics.get("total_loss", 0.0))
-                epoch_losses.append(step_loss)
-
-                if "tp" in metrics:
-                    seg_metrics.update_counts(
-                        tp=metrics["tp"],
-                        fp=metrics["fp"],
-                        fn=metrics["fn"],
-                        tn=metrics.get("tn", 0.0),
+        try:
+            for step, batch_np in enumerate(pbar):
+                # Check periodic checkpoint interval
+                if self.checkpoint_period > 0 and (time.time() - self.last_periodic_ckpt_time) >= self.checkpoint_period:
+                    save_state = unreplicate_params(current_state) if use_pmap else current_state
+                    curr_computed = seg_metrics.compute()
+                    self.ckpt_manager.save_periodic(
+                        epoch=epoch,
+                        step=self.global_step,
+                        params=save_state.params,
+                        metrics={
+                            "train_loss": float(np.mean(epoch_losses)) if epoch_losses else 0.0,
+                            "train_iou": curr_computed["iou"],
+                        },
+                        config=self.config,
+                        batch_stats=save_state.batch_stats,
+                        model_type=self.model_type,
                     )
-                current_metrics = seg_metrics.compute()
-                current_iou = current_metrics["iou"]
+                    self.last_periodic_ckpt_time = time.time()
 
-                pbar.set_postfix({"loss": f"{step_loss:.4f}", "iou": f"{current_iou:.4f}"})
-            except Exception as e:
-                logger.error(f"❌ Training step failed at epoch {epoch}, step {self.global_step}: {e}", exc_info=True)
-                raise e
+                self.global_step += 1
+                batch_jax = {k: jnp.asarray(v) for k, v in batch_np.items()}
+
+                try:
+                    if use_pmap:
+                        batch_sharded = shard_batch(batch_jax, num_devices=self.num_devices)
+                        self.rng, sub_rng = jax.random.split(self.rng)
+                        step_rngs = jax.random.split(sub_rng, self.num_devices)
+                        current_state, metrics = multi_train_step(current_state, batch_sharded, step_rngs)
+                        step_loss = float(unreplicate_params(metrics.get("total_loss", 0.0)))
+                        tp_val = float(unreplicate_params(metrics["tp"])) if "tp" in metrics else None
+                        fp_val = float(unreplicate_params(metrics["fp"])) if "fp" in metrics else None
+                        fn_val = float(unreplicate_params(metrics["fn"])) if "fn" in metrics else None
+                        tn_val = float(unreplicate_params(metrics.get("tn", 0.0))) if "tn" in metrics else None
+                    else:
+                        self.rng, step_rng = jax.random.split(self.rng)
+                        current_state, metrics = single_train_step(current_state, batch_jax, step_rng)
+                        step_loss = float(metrics.get("total_loss", 0.0))
+                        tp_val = float(metrics["tp"]) if "tp" in metrics else None
+                        fp_val = float(metrics["fp"]) if "fp" in metrics else None
+                        fn_val = float(metrics["fn"]) if "fn" in metrics else None
+                        tn_val = float(metrics.get("tn", 0.0)) if "tn" in metrics else None
+
+                    epoch_losses.append(step_loss)
+
+                    if tp_val is not None and fp_val is not None and fn_val is not None:
+                        seg_metrics.update_counts(
+                            tp=tp_val,
+                            fp=fp_val,
+                            fn=fn_val,
+                            tn=tn_val or 0.0,
+                        )
+                    current_metrics = seg_metrics.compute()
+                    current_iou = current_metrics["iou"]
+
+                    pbar.set_postfix({"loss": f"{step_loss:.4f}", "iou": f"{current_iou:.4f}"})
+                except Exception as e:
+                    logger.error(f"❌ Training step failed at epoch {epoch}, step {self.global_step}: {e}", exc_info=True)
+                    raise e
+        finally:
+            if use_pmap:
+                self.state = unreplicate_params(current_state)
+            else:
+                self.state = current_state
 
         avg_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         computed = seg_metrics.compute()
@@ -471,6 +584,9 @@ class Trainer:
         save_config(self.config, cfg_save_path)
 
         best_val_iou = 0.0
+        train_res: Dict[str, float] = {}
+        val_res: Dict[str, float] = {}
+        epoch = self.start_epoch
 
         try:
             for epoch in range(self.start_epoch, self.epochs + 1):
@@ -517,13 +633,16 @@ class Trainer:
         except KeyboardInterrupt:
             logger.warning("⚠️ Training interrupted by user (KeyboardInterrupt). Saving emergency checkpoint...")
             try:
+                # Ensure params and batch_stats are properly unreplicated for single-device format
+                save_params = unreplicate_params(self.state.params) if hasattr(self, "state") and self.state else {}
+                save_bs = unreplicate_params(self.state.batch_stats) if hasattr(self, "state") and self.state and self.state.batch_stats is not None else None
                 self.ckpt_manager.save(
                     epoch=epoch,
                     step=self.global_step,
-                    params=self.state.params,
-                    metrics={"interrupted": 1.0},
+                    params=save_params,
+                    metrics={"interrupted": 1.0, **train_res, **val_res},
                     config=self.config,
-                    batch_stats=self.state.batch_stats,
+                    batch_stats=save_bs,
                     model_type=self.model_type,
                 )
                 logger.info("✅ Emergency checkpoint saved to checkpoint_latest.pt.")

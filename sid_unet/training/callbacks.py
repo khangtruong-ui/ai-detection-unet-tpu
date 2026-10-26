@@ -50,12 +50,16 @@ class CheckpointManager:
         mode: str = "max",
         save_best: bool = True,
         save_latest: bool = True,
+        hf_repo_id: Optional[str] = None,
+        push_to_hub: bool = False,
     ):
         self.checkpoint_dir = checkpoint_dir
         self.metric_name = metric_name
         self.mode = mode.lower()
         self.save_best = save_best
         self.save_latest = save_latest
+        self.hf_repo_id = hf_repo_id
+        self.push_to_hub = bool(push_to_hub and hf_repo_id)
 
         self.best_score: Optional[float] = None
         self.best_epoch: Optional[int] = None
@@ -67,6 +71,52 @@ class CheckpointManager:
         if self.mode == "max":
             return score > self.best_score
         return score < self.best_score
+
+    def save_periodic(
+        self,
+        epoch: int,
+        step: int,
+        params: Any,
+        metrics: Dict[str, float],
+        config: Any,
+        batch_stats: Optional[Any] = None,
+        model_type: str = "diffusion_diff",
+    ) -> str:
+        """Save periodic checkpoint (checkpoint_periodic.pt)."""
+        periodic_path = os.path.join(self.checkpoint_dir, "checkpoint_periodic.pt")
+        save_checkpoint(
+            params=params,
+            path=periodic_path,
+            epoch=epoch,
+            step=step,
+            metrics=metrics,
+            best_score=self.best_score,
+            best_epoch=self.best_epoch,
+            config=config,
+            batch_stats=batch_stats,
+            model_type=model_type,
+            hf_repo_id=self.hf_repo_id,
+            push_to_hub=self.push_to_hub,
+        )
+        # Also update latest checkpoint pointer
+        if self.save_latest:
+            latest_path = os.path.join(self.checkpoint_dir, "checkpoint_latest.pt")
+            save_checkpoint(
+                params=params,
+                path=latest_path,
+                epoch=epoch,
+                step=step,
+                metrics=metrics,
+                best_score=self.best_score,
+                best_epoch=self.best_epoch,
+                config=config,
+                batch_stats=batch_stats,
+                model_type=model_type,
+                hf_repo_id=self.hf_repo_id,
+                push_to_hub=self.push_to_hub,
+            )
+        logger.info(f"💾 Periodic checkpoint saved to {periodic_path} (Epoch {epoch}, Step {step})")
+        return periodic_path
 
     def save(
         self,
@@ -100,6 +150,8 @@ class CheckpointManager:
                 config=config,
                 batch_stats=batch_stats,
                 model_type=model_type,
+                hf_repo_id=self.hf_repo_id,
+                push_to_hub=self.push_to_hub,
             )
             saved_paths["latest"] = latest_path
 
@@ -116,6 +168,8 @@ class CheckpointManager:
                 config=config,
                 batch_stats=batch_stats,
                 model_type=model_type,
+                hf_repo_id=self.hf_repo_id,
+                push_to_hub=self.push_to_hub,
             )
             saved_paths["best"] = best_path
             logger.info(f"🌟 Best model updated! {self.metric_name}: {current_score:.4f} at epoch {epoch}")
