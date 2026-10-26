@@ -145,10 +145,12 @@ class Trainer:
         # Parse periodic checkpoint interval (e.g. 3600, "2m", "1h", "300s")
         raw_period = tr_cfg.get("checkpoint_period")
         self.checkpoint_period = self._parse_period(raw_period)
-        # Periodic checkpoint timer begins after the first batch is completed
+        # Periodic checkpoint timer begins strictly after the second batch has been consumed
+        # to ensure initial XLA graph compilation completes and real training speed is established
         self.last_periodic_ckpt_time: Optional[float] = None
+        self.session_batches_consumed: int = 0
         if self.checkpoint_period > 0:
-            logger.info(f"⏱️ Periodic checkpointing enabled every {self.checkpoint_period:.1f} seconds (starts after first batch).")
+            logger.info(f"⏱️ Periodic checkpointing enabled every {self.checkpoint_period:.1f} seconds (starts after second batch).")
 
         # Hugging Face integration
         hf_repo_id = tr_cfg.get("hf_repo_id") or proj_cfg.get("hf_repo_id") or tr_cfg.get("hub_repo_id")
@@ -234,6 +236,8 @@ class Trainer:
 
     def resume_from_checkpoint(self, checkpoint_path: str):
         """Restore model weights and state from checkpoint."""
+        self.session_batches_consumed = 0
+        self.last_periodic_ckpt_time = None
         try:
             restored = load_checkpoint(checkpoint_path, config=self.config, model_type=self.model_type)
             if "params" in restored:
@@ -468,25 +472,33 @@ class Trainer:
 
                     pbar.set_postfix({"loss": f"{step_loss:.4f}", "iou": f"{current_iou:.4f}"})
 
-                    # Periodic checkpointing: start timer after first batch finishes, then save periodically
-                    if self.last_periodic_ckpt_time is None:
+                    # Track batches consumed in the active training session
+                    self.session_batches_consumed += 1
+
+                    # Periodic checkpointing:
+                    # Timer begins strictly after the second batch has been consumed,
+                    # establishing real training speed after initial XLA JIT compilation.
+                    if self.session_batches_consumed < 2:
+                        pass
+                    elif self.session_batches_consumed == 2 and self.last_periodic_ckpt_time is None:
                         self.last_periodic_ckpt_time = time.time()
-                    elif self.checkpoint_period > 0 and (time.time() - self.last_periodic_ckpt_time) >= self.checkpoint_period:
-                        save_state = unreplicate_params(current_state) if use_pmap else current_state
-                        curr_computed = seg_metrics.compute()
-                        self.ckpt_manager.save_periodic(
-                            epoch=epoch,
-                            step=self.global_step,
-                            params=save_state.params,
-                            metrics={
-                                "train_loss": float(np.mean(epoch_losses)) if epoch_losses else 0.0,
-                                "train_iou": curr_computed["iou"],
-                            },
-                            config=self.config,
-                            batch_stats=save_state.batch_stats,
-                            model_type=self.model_type,
-                        )
-                        self.last_periodic_ckpt_time = time.time()
+                    elif self.checkpoint_period > 0 and self.last_periodic_ckpt_time is not None:
+                        if (time.time() - self.last_periodic_ckpt_time) >= self.checkpoint_period:
+                            save_state = unreplicate_params(current_state) if use_pmap else current_state
+                            curr_computed = seg_metrics.compute()
+                            self.ckpt_manager.save_periodic(
+                                epoch=epoch,
+                                step=self.global_step,
+                                params=save_state.params,
+                                metrics={
+                                    "train_loss": float(np.mean(epoch_losses)) if epoch_losses else 0.0,
+                                    "train_iou": curr_computed["iou"],
+                                },
+                                config=self.config,
+                                batch_stats=save_state.batch_stats,
+                                model_type=self.model_type,
+                            )
+                            self.last_periodic_ckpt_time = time.time()
                 except Exception as e:
                     logger.error(f"❌ Training step failed at epoch {epoch}, step {self.global_step}: {e}", exc_info=True)
                     raise e

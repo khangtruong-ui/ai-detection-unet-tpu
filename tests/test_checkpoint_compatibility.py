@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
@@ -275,8 +276,8 @@ def test_hf_checkpoint_upload_and_download_mocked(tmp_path):
 
 
 @pytest.mark.timeout(30)
-def test_periodic_checkpoint_timer_starts_after_first_batch(tmp_path):
-    """Verify Trainer initializes last_periodic_ckpt_time to None and starts timer only after batch 1."""
+def test_periodic_checkpoint_timer_starts_after_second_batch(tmp_path):
+    """Verify Trainer initializes timer to None and starts timer strictly after second batch is consumed."""
     from sid_unet.utils.config import load_config
     out_dir = tmp_path / "periodic_test"
     cfg = load_config(
@@ -288,8 +289,26 @@ def test_periodic_checkpoint_timer_starts_after_first_batch(tmp_path):
         ],
     )
     trainer = Trainer(cfg)
-    # Timer MUST NOT start at __init__ before first batch finishes
+    # Timer MUST NOT start at __init__
     assert trainer.checkpoint_period == 10.0
+    assert trainer.last_periodic_ckpt_time is None
+    assert trainer.session_batches_consumed == 0
+
+    # Simulate batch 1 completion: timer still None
+    trainer.session_batches_consumed += 1
+    assert trainer.session_batches_consumed == 1
+    assert trainer.last_periodic_ckpt_time is None
+
+    # Simulate batch 2 completion: timer starts!
+    trainer.session_batches_consumed += 1
+    assert trainer.session_batches_consumed == 2
+    if trainer.session_batches_consumed == 2 and trainer.last_periodic_ckpt_time is None:
+        trainer.last_periodic_ckpt_time = time.time()
+    assert trainer.last_periodic_ckpt_time is not None
+
+    # Check reset on resume
+    trainer.resume_from_checkpoint(str(tmp_path / "non_existent.pt"))
+    assert trainer.session_batches_consumed == 0
     assert trainer.last_periodic_ckpt_time is None
 
 

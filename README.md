@@ -14,6 +14,7 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
 1. **JAX/Flax Native Architecture & Full Multi-GPU / TPU Utilization**:
    - High-throughput execution with XLA compilation (`jax.jit`).
    - Seamless compatibility with modern JAX (>=0.11) and Flax (>=0.12) with built-in tracer and replication compatibility shims.
+   - **Per-Device Batch Size Configuration**: `data.batch_size` in configuration files or CLI overrides is interpreted as **per device**. The global batch size is automatically computed across all detected devices (`global_batch_size = per_device_batch_size * num_devices`), guaranteeing even distribution across dual GPUs or 8 TPU cores.
    - **Multi-Device Data Parallelism via `jax.pmap`**: Automatically utilizes all available GPUs (e.g. dual Tesla T4 GPUs) or TPU cores. Divides microbatches across devices (`shard_batch`), replicates parameters (`replicate_params`), synchronizes gradients and batch normalization running statistics using all-reduce `jax.lax.pmean(axis_name="devices")`, ensuring 100% hardware utilization across all devices.
    - Proper Linen state management: updates `mutable=['batch_stats']` for batch normalization and threads `rngs={'dropout': ...}` PRNG keys across devices.
    - Asynchronous threaded prefetching in `DataLoaderIterator` to keep GPUs/TPUs fully utilized during streaming dataset training.
@@ -29,7 +30,7 @@ Built on **JAX**, **Flax Linen**, and **Optax**, `ai-detection-unet-tpu` is engi
      - Total representation $Z = 84$ channels with parallel VAE perpendicular skips.
 
 3. **Periodic Checkpointing & Hugging Face Hub Sync**:
-   - **Periodic Checkpointing (`checkpoint_period`)**: Supports real-time periodic checkpointing during long training runs (e.g. `checkpoint_period: "2m"`, `"1h"`, or `3600`). Saves `checkpoint_periodic.pt` and updates `checkpoint_latest.pt` without waiting for epoch completion. The checkpoint timer starts **strictly after the first batch is completed**, ensuring that initial XLA / JIT graph compilation delays do not prematurely trigger early checkpoint saves at step 1.
+   - **Periodic Checkpointing (`checkpoint_period`)**: Supports real-time periodic checkpointing during long training runs (e.g. `checkpoint_period: "2m"`, `"1h"`, or `3600`). Saves `checkpoint_periodic.pt` and updates `checkpoint_latest.pt` without waiting for epoch completion. The checkpoint timer starts **strictly after the second batch has been consumed**, ensuring that initial XLA / JIT graph compilation delays do not prematurely trigger early checkpoint saves and that the checkpoint timer accurately accounts for real training speed (including when resuming).
    - **Hugging Face Hub Integration (`--hf-repo`, `hf_repo_id`, `push_to_hub`)**: Automatically uploads checkpoints (`checkpoint_latest.pt`, `checkpoint_best.pt`, `checkpoint_periodic.pt`) to Hugging Face model repositories (e.g. `KhangTruong/diffusion-diff-minimized-512-fpn`). Directly pass `--hf-repo <repo_id>` on the CLI or specify in config.
    - **Hugging Face Auto-Resume**: Directly pass Hugging Face model identifiers or URIs (e.g. `--resume KhangTruong/diffusion-diff-minimized-512` or `hf://...`) to download and resume checkpoints automatically.
 
